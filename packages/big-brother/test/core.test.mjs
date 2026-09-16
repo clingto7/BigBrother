@@ -132,6 +132,7 @@ test("a review result is accepted only when every finding cites returned evidenc
     evidence: [{ id: "evidence-1", path: "src/app.ts", line: 12 }],
     limitations: [],
     candidate_facts: [],
+    context_decisions: [],
   });
 
   assert.deepEqual(valid, { ok: true, errors: [] });
@@ -150,8 +151,38 @@ test("a finding without evidence is rejected by the review contract", () => {
     evidence: [],
     limitations: [],
     candidate_facts: [],
+    context_decisions: [],
   });
 
   assert.equal(result.ok, false);
   assert.match(result.errors[0], /evidence/i);
+});
+
+test("a context decision is accepted only when it cites returned evidence", () => {
+  const result = validateReviewResult({
+    repository_id: "acme/app",
+    commit_sha: "commit-2",
+    parent_sha: "commit-1",
+    observed_branches: ["main"],
+    conclusion: "clean",
+    message_check: { status: "pass" },
+    findings: [],
+    policy_checks: [],
+    evidence: [],
+    limitations: [],
+    candidate_facts: [],
+    context_decisions: [
+      {
+        id: "decision-1",
+        action: "admit",
+        fact_id: "fact-1",
+        statement: "The repository uses ESM.",
+        evidence_refs: ["missing-evidence"],
+        rationale: "Prime accepted the worker proposal.",
+      },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("\n"), /context decision decision-1 cites unknown evidence/i);
 });

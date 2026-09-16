@@ -1,5 +1,6 @@
 import { buildReviewInput } from "./review-input.mjs";
 import { publishReviewResult } from "./publisher.mjs";
+import { validateReviewResult } from "./review-contract.mjs";
 
 /**
  * Coordinates one admitted job without putting polling or GitHub knowledge in
@@ -43,11 +44,15 @@ export class ReviewCoordinator {
 			job,
 			workspace,
 		});
+		const canonicalContext = (store.getContextLedger?.(job.repositoryId) ?? []).filter(
+			(fact) => fact.status === "active",
+		);
 		const reviewInput = this.#inputBuilder({
 			...evidence,
 			repositoryId: job.repositoryId,
 			commitSha: job.commitSha,
 			observedBranches: job.observedBranches,
+			canonicalContext,
 			workspace,
 		});
 		const runtimeProfile = { ...repositoryProfile, cwd: workspace.directory };
@@ -56,6 +61,15 @@ export class ReviewCoordinator {
 			repositoryProfile.stateNamespace,
 		);
 		const reviewResult = await this.#runtimeSupervisor.submitReview(handle, reviewInput);
+		const validation = validateReviewResult(reviewResult);
+		if (!validation.ok) throw new Error(`invalid review result: ${validation.errors.join("; ")}`);
+		if (reviewResult.context_decisions?.length > 0) {
+			store.recordContextDecisions({
+				repositoryId: job.repositoryId,
+				commitSha: job.commitSha,
+				reviewResult,
+			});
+		}
 		const published = await this.#publisher({
 			github,
 			store,

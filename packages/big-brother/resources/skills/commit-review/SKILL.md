@@ -20,6 +20,9 @@ Use this procedure for each host-supplied `ReviewInput`:
    dependency installation in the static profile.
 6. Produce the complete `ReviewResult`, including clean checks and limitations.
    Findings without evidence references are invalid.
+7. Keep worker `candidate_facts` separate from Prime `context_decisions`. Emit a
+   context decision only when Repository Prime admits, corrects, supersedes, or
+   retracts a fact using cited repository evidence.
 
 ## Evidence discipline
 

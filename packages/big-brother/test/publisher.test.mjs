@@ -17,6 +17,7 @@ function review(overrides = {}) {
     evidence: [],
     limitations: [],
     candidate_facts: [],
+    context_decisions: [],
     ...overrides,
   };
 }

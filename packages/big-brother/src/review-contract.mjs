@@ -10,6 +10,7 @@ const REQUIRED_FIELDS = [
   "evidence",
   "limitations",
   "candidate_facts",
+  "context_decisions",
 ];
 
 export function validateReviewResult(result) {
@@ -23,7 +24,7 @@ export function validateReviewResult(result) {
     if (!(field in result)) errors.push(`missing field: ${field}`);
   }
 
-  for (const field of ["observed_branches", "findings", "policy_checks", "evidence", "limitations", "candidate_facts"]) {
+  for (const field of ["observed_branches", "findings", "policy_checks", "evidence", "limitations", "candidate_facts", "context_decisions"]) {
     if (field in result && !Array.isArray(result[field])) errors.push(`${field} must be an array`);
   }
 
@@ -57,7 +58,39 @@ export function validateReviewResult(result) {
         }
       }
     }
+
+    if (Array.isArray(result.context_decisions)) {
+      for (const decision of result.context_decisions) {
+        const decisionId = decision?.id ?? "<unknown>";
+        if (typeof decision?.id !== "string" || decision.id.length === 0) {
+          errors.push("context decision must have a non-empty id");
+        }
+        if (typeof decision?.fact_id !== "string" || decision.fact_id.length === 0) {
+          errors.push(`context decision ${decisionId} must have a non-empty fact_id`);
+        }
+        if (!CONTEXT_DECISION_ACTIONS.has(decision?.action)) {
+          errors.push(`context decision ${decisionId} has unsupported action: ${decision?.action}`);
+        }
+        if (
+          (decision?.action === "admit" || decision?.action === "correct") &&
+          (typeof decision?.statement !== "string" || decision.statement.length === 0)
+        ) {
+          errors.push(`context decision ${decisionId} must have a non-empty statement`);
+        }
+        if (!Array.isArray(decision?.evidence_refs) || decision.evidence_refs.length === 0) {
+          errors.push(`context decision ${decisionId} must cite evidence`);
+          continue;
+        }
+        for (const evidenceRef of decision.evidence_refs) {
+          if (!evidenceIds.has(evidenceRef)) {
+            errors.push(`context decision ${decisionId} cites unknown evidence: ${evidenceRef}`);
+          }
+        }
+      }
+    }
   }
 
   return { ok: errors.length === 0, errors };
 }
+
+const CONTEXT_DECISION_ACTIONS = new Set(["admit", "correct", "supersede", "retract"]);

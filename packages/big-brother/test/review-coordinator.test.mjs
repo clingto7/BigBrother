@@ -33,6 +33,7 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 					evidence: [],
 					limitations: [],
 					candidate_facts: [],
+					context_decisions: [],
 				};
 			},
 		},
