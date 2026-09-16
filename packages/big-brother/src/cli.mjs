@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 
 import { loadConfigurationFile } from "./configuration.mjs";
 import { GitHubRestAdapter } from "./github-rest.mjs";
+import { retryReviewFindingIssues } from "./finding-issue-publisher.mjs";
 import { GitReviewEvidenceAdapter } from "./git-review-evidence.mjs";
 import { GitCliAdapter, WorkspaceManager } from "./workspace.mjs";
 import { PrimeRpcRuntimeFactory } from "./prime-rpc-runtime.mjs";
@@ -109,7 +110,7 @@ export async function runCli(argv, { stdout = console.log, stderr = console.erro
 	const configuration = await loadConfigurationFile(options.configPath);
 	if (command === "review") {
 		if (!options.repositoryId || !options.commitSha) throw new Error("usage: big-brother review --config <path> --repo <owner/name> --commit <sha>");
-		await runOneShotReview(configuration, options, stdout);
+		await runOneShotReview(configuration, options, stdout, stderr);
 		return 0;
 	}
 	if (command === "watch") {
@@ -222,6 +223,9 @@ export async function runWatch(configuration, options, { stdout = console.log, s
 				try {
 					const result = await runRepositoryCycle(service);
 					stdout(`${service.profile.repositoryId}: discovered=${result.discovered} processed=${result.processed} failed=${result.failed}`);
+					for (const failure of result.findingIssueFailures) {
+						stderr(`${service.profile.repositoryId}: finding ${failure.findingId}: ${failure.lastError}`);
+					}
 				} catch (error) {
 					stderr(`${service.profile.repositoryId}: cycle failed: ${error.message}`);
 				}
@@ -237,7 +241,7 @@ export async function runWatch(configuration, options, { stdout = console.log, s
 	}
 }
 
-async function runOneShotReview(configuration, options, stdout) {
+async function runOneShotReview(configuration, options, stdout, stderr) {
 	const profile = configuration.repositories.find((item) => item.repositoryId === options.repositoryId);
 	if (!profile) throw new Error(`repository is not configured: ${options.repositoryId}`);
 	const service = createRepositoryServices(profile);
@@ -251,6 +255,9 @@ async function runOneShotReview(configuration, options, stdout) {
 			const result = await processJob(service, job);
 			service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "completed" });
 			stdout(`reviewed ${profile.repositoryId}@${options.commitSha}; status=big-brother/review`);
+			for (const failure of result.findingIssues.filter((publication) => publication.status === "failed")) {
+				stderr(`${profile.repositoryId}: finding ${failure.findingId}: ${failure.lastError}`);
+			}
 		} catch (error) {
 			service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "failed" });
 			throw error;
@@ -260,7 +267,12 @@ async function runOneShotReview(configuration, options, stdout) {
 	}
 }
 
-async function runRepositoryCycle(service) {
+export async function runRepositoryCycle(service) {
+	const retriedFindingIssues = await retryReviewFindingIssues({
+		github: service.publishGithub,
+		store: service.store,
+		repositoryId: service.profile.repositoryId,
+	});
 	for (const branchName of service.profile.trackedBranches) {
 		if (!service.store.getBranch({ repositoryId: service.profile.repositoryId, branchName })) {
 			const head = await service.readGithub.getBranchHead({ repositoryId: service.profile.repositoryId, branchName });
@@ -287,7 +299,10 @@ async function runRepositoryCycle(service) {
 			failed += 1;
 		}
 	}
-	return { ...pollResult, processed, failed };
+	const findingIssueFailures = service.store.listRetryableFindingIssues(service.profile.repositoryId)
+		.filter((publication) => publication.status === "failed")
+		.map(({ findingId, lastError }) => ({ findingId, lastError }));
+	return { ...pollResult, processed, failed, retriedFindingIssues, findingIssueFailures };
 }
 
 async function processJob(service, job) {
@@ -353,8 +368,8 @@ Usage:
 big-brother agent starts the independent Prime-compatible agent. Inside it,
 use /login to configure provider authentication and /model to choose a
 model. The watch/review commands reuse that Big Brother agent identity.
-Big Brother watch/review operations are read-only with respect to GitHub source
-and publish an advisory Commit Status only.
+Big Brother watch/review operations never modify GitHub source. They publish an
+advisory Commit Status and Prime-approved Review finding issues.
 
 big-brother service render prints a foreground-watch service definition. Redirect
 the output to a launchd plist or systemd unit after reviewing its paths.

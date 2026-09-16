@@ -6,6 +6,7 @@
       "cloneUrl": "git@github.com:owner/repository.git",
       "trackedBranches": ["main"],
       "stateNamespace": ".big-brother/state/owner-repository",
+      "reviewFindingIssueLabels": ["big-brother"],
       "credentials": {
         "githubReadTokenEnv": "GITHUB_TOKEN",
         "githubStatusTokenEnv": "GITHUB_STATUS_TOKEN",

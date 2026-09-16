@@ -152,3 +152,55 @@ test("GitHub REST adapter creates a commit status", async () => {
     description: "Big Brother: clean",
   });
 });
+
+test("GitHub REST adapter creates a labeled issue in the watched repository", async () => {
+  const calls = [];
+  const github = new GitHubRestAdapter({
+    token: "status-and-issues-token",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response({ number: 42, html_url: "https://github.com/acme/app/issues/42" }, 201);
+    },
+  });
+
+  const issue = await github.createIssue({
+    repositoryId: "acme/app",
+    title: "Null authorization bypass",
+    body: "Evidence-backed finding.",
+    labels: ["big-brother", "security"],
+  });
+
+  assert.equal(issue.number, 42);
+  assert.equal(calls[0].url, "https://api.github.com/repos/acme/app/issues");
+  assert.equal(calls[0].options.headers.authorization, "Bearer status-and-issues-token");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    title: "Null authorization bypass",
+    body: "Evidence-backed finding.",
+    labels: ["big-brother", "security"],
+  });
+});
+
+test("GitHub REST adapter reconciles a finding issue by listing stable body markers", async () => {
+  const urls = [];
+  const github = new GitHubRestAdapter({
+    token: "status-and-issues-token",
+    fetchImpl: async (url) => {
+      urls.push(url);
+      return response([
+        {
+          number: 42,
+          html_url: "https://github.com/acme/app/issues/42",
+          body: "<!-- big-brother-finding-id: auth-null-bypass -->",
+        },
+      ]);
+    },
+  });
+
+  const issue = await github.findIssueByFindingId({
+    repositoryId: "acme/app",
+    findingId: "auth-null-bypass",
+  });
+
+  assert.equal(issue.number, 42);
+  assert.equal(urls[0], "https://api.github.com/repos/acme/app/issues?state=all&per_page=100&page=1");
+});

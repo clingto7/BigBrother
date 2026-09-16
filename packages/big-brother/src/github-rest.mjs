@@ -64,6 +64,27 @@ export class GitHubRestAdapter {
     });
   }
 
+  async createIssue({ repositoryId, title, body, labels = [] }) {
+    return this.#request(`/repos/${repositoryId}/issues`, {
+      method: "POST",
+      body: { title, body, labels },
+    });
+  }
+
+  async findIssueByFindingId({ repositoryId, findingId }) {
+    const marker = `<!-- big-brother-finding-id: ${findingId} -->`;
+    for (let page = 1; ; page += 1) {
+      const issues = await this.#get(
+        `/repos/${repositoryId}/issues?state=all&per_page=${this.#pageSize}&page=${page}`,
+      );
+      if (!Array.isArray(issues)) {
+        throw new Error(`GitHub Issues response is not an array: ${repositoryId}`);
+      }
+      const matched = issues.find((issue) => issue?.body?.includes(marker));
+      if (matched || issues.length < this.#pageSize) return matched;
+    }
+  }
+
   async #get(path) {
     return this.#request(path, { method: "GET" });
   }

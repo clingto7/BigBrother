@@ -17,11 +17,15 @@ Current public seams:
 - `pollRepository`: control-plane poller that consumes a GitHub Adapter,
   enqueues every commit after the branch cursor, and advances the cursor only
   after the range reaches the observed head.
-- `GitHubRestAdapter`: read-only GitHub REST Adapter for branch heads and
-  compare ranges. It uses injected `fetch` at the network seam and keeps the
-  token in the request header only.
+- `GitHubRestAdapter`: GitHub REST Adapter for branch heads, compare ranges,
+  Commit Statuses, and Prime-approved Review finding issues. It uses injected
+  `fetch` at the network seam and keeps the token in the request header only.
 - `publishReviewResult`: validates and maps a review result to a non-blocking
   Commit Status, creating or updating it through the GitHub Adapter.
+- `publishReviewFindingIssues`: creates only the Review finding issues that
+  Repository Prime explicitly approves, and reuses durable stable-finding
+  mappings on repeated cycles. Failed or indeterminate publications remain
+  retryable; the next watch cycle reconciles the stable marker before creating.
 - `PrimeRuntimeSupervisor`: keeps one long-lived Prime runtime per repository
   and serializes review submissions until context-conflict handling exists.
 - `PrimeRpcRuntimeFactory`: starts the pinned Prime bundle through its public
@@ -30,8 +34,9 @@ Current public seams:
 - `buildReviewInput`: creates the host-owned, immutable commit evidence packet
   passed to Prime; it never executes or interprets repository content.
 - `ReviewCoordinator`: runs one admitted job through workspace materialization,
-  recovered-context evidence assembly, Prime submission, Commit Status
-  publication, and durable reconciliation of Prime-approved context decisions.
+  recovered-context evidence assembly, Prime submission, Commit Status and
+  Review finding issue publication, and durable reconciliation of
+  Prime-approved context decisions.
 - `GitReviewEvidenceAdapter`: reads the fixed workspace commit, parent diff,
   message, changed paths, and policy documents with read-only Git commands.
 - `createReviewerProfile`: defines the initial static, read-only system

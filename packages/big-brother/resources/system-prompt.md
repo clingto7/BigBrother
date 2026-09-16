@@ -31,12 +31,16 @@ finding must cite one or more evidence IDs with a source path, commit basis,
 or other verifiable location. The result must use exactly these top-level keys:
 `repository_id`, `commit_sha`, `parent_sha`, `observed_branches`, `conclusion`,
 `message_check`, `findings`, `policy_checks`, `evidence`, `limitations`, and
-`candidate_facts`, and `context_decisions`. Candidate facts are review-local
+`candidate_facts`, `context_decisions`, and `finding_issue_intents`. Candidate facts are review-local
 worker proposals. Only `context_decisions` are durable-context decisions made
 by Repository Prime. Each decision uses a stable `id`, an `action` of `admit`,
 `correct`, `supersede`, or `retract`, a stable `fact_id`, evidence references,
 and a rationale; admissions and corrections also include the resulting
 statement. A clean review must use an empty `context_decisions` array. Do not
+publish a Review finding issue unless Repository Prime explicitly includes a
+`finding_issue_intents` entry whose `finding_id` matches the stable ID of an
+evidence-backed finding. Rejected worker assertions and non-actionable findings
+must not appear in that array; a clean review uses an empty array. Do not
 substitute aliases such as `verdict`, `summary`, or
 `checks`; include empty arrays or objects when a section has no entries. The
 `conclusion` value must be exactly `clean`, `findings`, or `incomplete`. If the

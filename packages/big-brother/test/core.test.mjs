@@ -133,6 +133,7 @@ test("a review result is accepted only when every finding cites returned evidenc
     limitations: [],
     candidate_facts: [],
     context_decisions: [],
+    finding_issue_intents: [],
   });
 
   assert.deepEqual(valid, { ok: true, errors: [] });
@@ -152,6 +153,7 @@ test("a finding without evidence is rejected by the review contract", () => {
     limitations: [],
     candidate_facts: [],
     context_decisions: [],
+    finding_issue_intents: [],
   });
 
   assert.equal(result.ok, false);
@@ -181,6 +183,7 @@ test("a context decision is accepted only when it cites returned evidence", () =
         rationale: "Prime accepted the worker proposal.",
       },
     ],
+    finding_issue_intents: [],
   });
 
   assert.equal(result.ok, false);
@@ -209,6 +212,7 @@ test("a context decision requires a rationale and cannot accompany a clean revie
         evidence_refs: ["E1"],
       },
     ],
+    finding_issue_intents: [],
   };
 
   const missingRationale = validateReviewResult(base);
@@ -222,4 +226,25 @@ test("a context decision requires a rationale and cannot accompany a clean revie
   });
   assert.equal(cleanAdmission.ok, false);
   assert.match(cleanAdmission.errors.join("\n"), /clean review cannot contain context decisions/i);
+});
+
+test("a finding issue intent must identify an evidence-backed finding in the same Prime result", () => {
+	const result = validateReviewResult({
+		repository_id: "acme/app",
+		commit_sha: "commit-2",
+		parent_sha: "commit-1",
+		observed_branches: ["main"],
+		conclusion: "findings",
+		message_check: { status: "pass" },
+		findings: [{ id: "finding-1", evidence_refs: ["E1"] }],
+		policy_checks: [],
+		evidence: [{ id: "E1", path: "src/app.ts", line: 12 }],
+		limitations: [],
+		candidate_facts: [],
+		context_decisions: [],
+		finding_issue_intents: [{ finding_id: "unknown-finding" }],
+	});
+
+	assert.equal(result.ok, false);
+	assert.match(result.errors.join("\n"), /finding issue intent cites unknown finding: unknown-finding/i);
 });

@@ -129,12 +129,18 @@ and review coordinator provide idempotency.
 ### Job Store
 
 Persists repository profiles, branch cursors, commit-to-branch associations,
-review job state, Commit Status publication state, and context provenance. The
+review job state, Commit Status publication state, stable finding-to-issue
+mappings, retryable issue-publication failures, and context provenance. The
 recommended MVP Adapter is a small SQLite database in the service-owned data
 volume; the rest of Big Brother sees only the Job Store Interface.
 
 The job identity is `(repository_id, commit_sha)`, not a poll attempt or a
 branch name. A job may be associated with several tracked branches.
+
+Review completion and finding-issue publication are separate state machines.
+An issue failure leaves the review completed and records the request payload
+and error for the next cycle. An indeterminate attempt is reconciled by its
+stable finding marker before another issue is created.
 
 ### GitHub Adapter
 
@@ -142,12 +148,14 @@ The only external repository Adapter in the MVP. It has two separate
 responsibilities behind one narrow seam:
 
 - read repository refs, commit metadata, commit parents, and file/diff data;
-- publish and update the non-blocking Commit Status for a reviewed commit.
+- publish and update the non-blocking Commit Status for a reviewed commit;
+- create Prime-approved Review finding issues in the watched Repository.
 
 It has no operation for push, branch mutation, file mutation, PR code changes,
-or merge control. The Adapter's read credential and Commit Status publication
-credential are configured separately; write capability is explicit and must
-not be inferred from a generic GitHub login token. See ADR 0012.
+or merge control. The Adapter's read credential and publication credential are
+configured separately; the existing publication credential is reused for
+Commit Status and Issues, with both write capabilities granted explicitly. It
+must not be inferred from a generic GitHub login token. See ADRs 0012 and 0013.
 
 ### Workspace Manager
 

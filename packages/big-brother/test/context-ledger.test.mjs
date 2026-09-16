@@ -350,6 +350,7 @@ function review(overrides = {}) {
 		limitations: [],
 		candidate_facts: [],
 		context_decisions: [],
+		finding_issue_intents: [],
 		...overrides,
 	};
 }

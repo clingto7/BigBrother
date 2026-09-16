@@ -23,6 +23,9 @@ Use this procedure for each host-supplied `ReviewInput`:
 7. Keep worker `candidate_facts` separate from Prime `context_decisions`. Emit a
    context decision only when Repository Prime admits, corrects, supersedes, or
    retracts a fact using cited repository evidence.
+8. Emit a `finding_issue_intents` entry only for an evidence-backed finding that
+   Repository Prime explicitly classifies as actionable. Use the finding's stable
+   `id` as `finding_id`; rejected and non-actionable assertions emit no intent.
 
 ## Evidence discipline
 

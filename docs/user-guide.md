@@ -61,7 +61,7 @@ big-brother completion fish | source
 之后输入 `big-brother <Tab>`、`big-brother review --<Tab>` 或
 `big-brother watch --config <Tab>` 即可看到命令、参数和文件路径提示。
 
-仓库源代码读取和 Commit Status 发布使用不同的 credential 引用。当前 MVP 使用 Commit Status，因此可以使用 fine-grained PAT 的 `Commit statuses: write`；后续如果切换回 Check Run，才需要 GitHub App 等 Checks 写入能力。详见 [Create a commit status](https://docs.github.com/en/rest/commits/statuses)。
+仓库源代码读取和发布使用不同的 credential 引用。发布 credential 同时用于 advisory Commit Status 和 Prime 明确批准的 Review finding issues，因此 fine-grained PAT 需要目标仓库的 `Commit statuses: write` 与 `Issues: write`。后续如果切换回 Check Run，才需要 GitHub App 等 Checks 写入能力。详见 [Create a commit status](https://docs.github.com/en/rest/commits/statuses) 与 [Create an issue](https://docs.github.com/en/rest/issues/issues#create-an-issue)。
 
 Prime runtime 已随项目放在 `runtime/`，不需要先重新构建 Prime。可以先确认：
 
@@ -88,6 +88,7 @@ cp config/big-brother.example.json config/big-brother.json
       "cloneUrl": "git@github.com:owner/repository.git",
       "trackedBranches": ["main"],
       "stateNamespace": ".big-brother/state/owner-repository",
+      "reviewFindingIssueLabels": ["big-brother"],
       "credentials": {
         "githubReadTokenEnv": "GITHUB_TOKEN",
         "githubStatusTokenEnv": "GITHUB_STATUS_TOKEN",
@@ -105,6 +106,7 @@ cp config/big-brother.example.json config/big-brother.json
 - 新增到配置的 branch 第一次看到时只建立当前 head 作为 baseline，不自动回溯历史；
 - 同一个 commit 从多个 tracked branch 到达时只审查一次；
 - `stateNamespace` 必须对运行进程可读写，SQLite、session 和 workspace 都放在其下；
+- `reviewFindingIssueLabels` 是发布到 watched Repository 的 Review finding issue 标签；可以省略或设为空数组；
 - credential 字段写的是环境变量名，不是 token、私钥内容或 API key；
 - `cloneUrl` 使用 SSH 时，`gitSshKeyPathEnv` 指向私钥文件路径。CLI 会以 `GIT_SSH_COMMAND` 的方式显式使用它；也可以让运行进程使用已配置的 ssh-agent。
 - 配置文件不包含 provider、model 或模型 API key；这些属于 Prime agent 的运行时身份配置。
@@ -137,7 +139,7 @@ CLI 每次启动时会自动读取 `~/.config/big-brother/env`（也可以用
 变量优先。可以把上面的三行放入该文件，并将权限设为 `600`；也可以继续在
 启动 watcher 前手动 `source` 它。
 
-`githubReadTokenEnv` 是 GitHub API 读取 branch head/commit range 的 token；公开仓库可以省略它。`githubStatusTokenEnv` 用于在目标 commit 上创建 advisory Commit Status，授予目标仓库 `Commit statuses: write` 即可；它不需要 `Contents: write`，也不应拥有修改仓库内容的权限。
+`githubReadTokenEnv` 是 GitHub API 读取 branch head/commit range 的 token；公开仓库可以省略它。`githubStatusTokenEnv` 是现有发布 credential：它用于在目标 commit 上创建 advisory Commit Status，也用于在 watched Repository 创建 Prime 批准的 Review finding issue，因此需要 `Commit statuses: write` 和 `Issues: write`。它不需要 `Contents: write`，也不应拥有修改仓库内容的权限。
 
 如果未来需要发布带丰富输出和 annotations 的 Check Run，再配置 GitHub App 的 `Checks: write`；GitHub 的 Checks 总览和具体 endpoint 对 PAT 支持存在不一致，当前 MVP 暂不依赖这条路径。
 
@@ -206,7 +208,11 @@ big-brother review \
 3. 将指定 commit 建立为 review job；
 4. 固定 workspace 到该 commit；
 5. 启动对应仓库的 Prime session；
-6. 发布该 commit 的 Big Brother Commit Status。
+6. 发布该 commit 的 Big Brother Commit Status；仅当 Prime 输出 actionable `finding_issue_intents` 时，创建或复用对应的 Review finding issue。
+
+Issue 发布失败不会把已完成的 review 改成失败；watch 输出会报告明确错误，
+SQLite 会保留待重试请求。下一轮 cycle 会先用 stable finding identity
+对 GitHub Issues 做 reconciliation，再决定是否创建，避免不确定请求产生重复 issue。
 
 它不会 push，也不会改写仓库。首次使用时建议选择一个已经存在的 commit SHA，并检查 GitHub 上是否出现 `big-brother/review` status。
 

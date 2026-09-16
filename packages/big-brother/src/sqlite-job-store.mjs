@@ -50,6 +50,19 @@ export class SqliteJobStore {
         evidence_json TEXT NOT NULL,
         PRIMARY KEY (repository_id, decision_id)
       );
+      CREATE TABLE IF NOT EXISTS review_finding_issues (
+        repository_id TEXT NOT NULL,
+        finding_id TEXT NOT NULL,
+        source_commit_sha TEXT NOT NULL,
+        issue_title TEXT NOT NULL,
+        issue_body TEXT NOT NULL,
+        labels_json TEXT NOT NULL,
+        issue_number INTEGER,
+        issue_url TEXT,
+        publication_status TEXT NOT NULL,
+        last_error TEXT,
+        PRIMARY KEY (repository_id, finding_id)
+      );
     `);
     const columns = this.#db.prepare(`PRAGMA table_info(review_jobs)`).all().map((row) => row.name);
     if (!columns.includes("check_run_id")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN check_run_id INTEGER`);
@@ -155,6 +168,81 @@ export class SqliteJobStore {
       .prepare(`SELECT commit_sha FROM review_jobs WHERE repository_id = ? ORDER BY rowid`)
       .all(repositoryId)
       .map((row) => this.getReviewJob({ repositoryId, commitSha: row.commit_sha }));
+  }
+
+  getFindingIssue({ repositoryId, findingId }) {
+    const row = this.#db.prepare(`
+      SELECT issue_number, issue_url, publication_status, last_error
+      FROM review_finding_issues
+      WHERE repository_id = ? AND finding_id = ?
+    `).get(repositoryId, findingId);
+    return row
+      ? {
+          repositoryId,
+          findingId,
+          issueNumber: row.issue_number ?? undefined,
+          issueUrl: row.issue_url ?? undefined,
+          status: row.publication_status,
+          lastError: row.last_error ?? undefined,
+        }
+      : undefined;
+  }
+
+  stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels }) {
+    this.#db.prepare(`
+      INSERT INTO review_finding_issues (
+        repository_id, finding_id, source_commit_sha, issue_title, issue_body,
+        labels_json, publication_status
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+      ON CONFLICT (repository_id, finding_id) DO UPDATE SET
+        source_commit_sha = excluded.source_commit_sha,
+        issue_title = excluded.issue_title,
+        issue_body = excluded.issue_body,
+        labels_json = excluded.labels_json,
+        publication_status = CASE
+          WHEN review_finding_issues.issue_number IS NULL THEN 'pending'
+          ELSE review_finding_issues.publication_status
+        END,
+        last_error = CASE
+          WHEN review_finding_issues.issue_number IS NULL THEN NULL
+          ELSE review_finding_issues.last_error
+        END
+    `).run(repositoryId, findingId, commitSha, title, body, JSON.stringify(labels));
+  }
+
+  listRetryableFindingIssues(repositoryId) {
+    return this.#db.prepare(`
+      SELECT finding_id, source_commit_sha, issue_title, issue_body, labels_json,
+             publication_status, last_error
+      FROM review_finding_issues
+      WHERE repository_id = ? AND issue_number IS NULL
+      ORDER BY rowid
+    `).all(repositoryId).map((row) => ({
+      repositoryId,
+      findingId: row.finding_id,
+      commitSha: row.source_commit_sha,
+      title: row.issue_title,
+      body: row.issue_body,
+      labels: JSON.parse(row.labels_json),
+      status: row.publication_status,
+      lastError: row.last_error ?? undefined,
+    }));
+  }
+
+  recordFindingIssue({ repositoryId, findingId, issueNumber, issueUrl }) {
+    this.#db.prepare(`
+      UPDATE review_finding_issues
+      SET issue_number = ?, issue_url = ?, publication_status = 'published', last_error = NULL
+      WHERE repository_id = ? AND finding_id = ?
+    `).run(issueNumber, issueUrl ?? null, repositoryId, findingId);
+  }
+
+  recordFindingIssueFailure({ repositoryId, findingId, error }) {
+    this.#db.prepare(`
+      UPDATE review_finding_issues
+      SET publication_status = 'failed', last_error = ?
+      WHERE repository_id = ? AND finding_id = ?
+    `).run(error, repositoryId, findingId);
   }
 
   recordContextDecisions({ repositoryId, commitSha, reviewResult }) {

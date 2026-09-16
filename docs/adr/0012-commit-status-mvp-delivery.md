@@ -1,6 +1,6 @@
 # ADR 0012: Use Commit Status as the MVP Review Surface
 
-Status: Accepted
+Status: Accepted; publication-credential scope partially superseded by ADR 0013
 
 Date: 2026-09-14
 

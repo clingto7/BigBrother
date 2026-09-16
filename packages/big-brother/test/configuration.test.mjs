@@ -8,6 +8,7 @@ const repository = {
 	cloneUrl: "git@github.com:acme/app.git",
 	trackedBranches: ["main", "release", "main"],
 	stateNamespace: "/var/lib/big-brother/acme-app",
+	reviewFindingIssueLabels: ["big-brother", "security", "big-brother"],
 	credentials: {
 		githubReadTokenEnv: "GITHUB_TOKEN",
 		githubCheckRunTokenEnv: "GITHUB_CHECKS_TOKEN",
@@ -21,7 +22,16 @@ test("configuration owns repository watch settings while preserving credential r
 	assert.equal(configuration.pollIntervalMs, 5_000);
 	assert.deepEqual(configuration.repositories[0].trackedBranches, ["main", "release"]);
 	assert.deepEqual(configuration.repositories[0].credentials, repository.credentials);
+	assert.deepEqual(configuration.repositories[0].reviewFindingIssueLabels, ["big-brother", "security"]);
 	assert.equal(configuration.repositories[0].githubReadToken, undefined);
+});
+
+test("configuration rejects invalid Review finding issue labels", () => {
+	const diagnostics = validateConfiguration({
+		repositories: [{ ...repository, reviewFindingIssueLabels: ["big-brother", ""] }],
+	});
+	assert.equal(diagnostics.ok, false);
+	assert.match(diagnostics.errors.join("; "), /reviewFindingIssueLabels.*non-empty strings/);
 });
 
 test("configuration applies a polling default and rejects secret values", () => {

@@ -1,4 +1,5 @@
 import { buildReviewInput } from "./review-input.mjs";
+import { publishReviewFindingIssues } from "./finding-issue-publisher.mjs";
 import { publishReviewResult } from "./publisher.mjs";
 import { validateReviewResult } from "./review-contract.mjs";
 
@@ -13,6 +14,7 @@ export class ReviewCoordinator {
 	#evidenceProvider;
 	#inputBuilder;
 	#publisher;
+	#findingIssuePublisher;
 
 	constructor({
 		workspaceManager,
@@ -20,12 +22,14 @@ export class ReviewCoordinator {
 		evidenceProvider,
 		inputBuilder = buildReviewInput,
 		publisher = publishReviewResult,
+		findingIssuePublisher = publishReviewFindingIssues,
 	}) {
 		this.#workspaceManager = workspaceManager;
 		this.#runtimeSupervisor = runtimeSupervisor;
 		this.#evidenceProvider = evidenceProvider;
 		this.#inputBuilder = inputBuilder;
 		this.#publisher = publisher;
+		this.#findingIssuePublisher = findingIssuePublisher;
 	}
 
 	async process({ repositoryProfile, job, github, store }) {
@@ -75,6 +79,12 @@ export class ReviewCoordinator {
 			store,
 			reviewResult,
 		});
+		const findingIssues = await this.#findingIssuePublisher({
+			github,
+			store,
+			reviewResult,
+			labels: repositoryProfile.reviewFindingIssueLabels ?? [],
+		});
 		if (reviewResult.context_decisions?.length > 0) {
 			store.recordContextDecisions({
 				repositoryId: job.repositoryId,
@@ -83,6 +93,6 @@ export class ReviewCoordinator {
 			});
 		}
 
-		return { reviewInput, reviewResult, published, workspace };
+		return { reviewInput, reviewResult, published, findingIssues, workspace };
 	}
 }

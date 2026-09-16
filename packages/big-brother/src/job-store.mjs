@@ -13,6 +13,7 @@ export class InMemoryJobStore {
   #branches = new Map();
   #reviewJobs = new Map();
   #contextDecisions = new Map();
+  #findingIssues = new Map();
 
   enrollBranch({ repositoryId, branchName, headSha }) {
     const key = `${repositoryId}:${branchName}`;
@@ -89,6 +90,64 @@ export class InMemoryJobStore {
     return [...this.#reviewJobs.values()]
       .filter((job) => job.repositoryId === repositoryId)
       .map(copy);
+  }
+
+  getFindingIssue({ repositoryId, findingId }) {
+    const issue = this.#findingIssues.get(`${repositoryId}:${findingId}`);
+    if (!issue) return undefined;
+    return copy({
+      repositoryId: issue.repositoryId,
+      findingId: issue.findingId,
+      issueNumber: issue.issueNumber,
+      issueUrl: issue.issueUrl,
+      status: issue.status,
+      lastError: issue.lastError,
+    });
+  }
+
+  stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels }) {
+    const key = `${repositoryId}:${findingId}`;
+    const existing = this.#findingIssues.get(key);
+    if (existing?.issueNumber != null) return;
+    this.#findingIssues.set(key, {
+      repositoryId,
+      findingId,
+      issueNumber: undefined,
+      issueUrl: undefined,
+      status: "pending",
+      lastError: undefined,
+      commitSha,
+      title,
+      body,
+      labels: copy(labels),
+    });
+  }
+
+  listRetryableFindingIssues(repositoryId) {
+    return [...this.#findingIssues.values()]
+      .filter((issue) => issue.repositoryId === repositoryId && issue.issueNumber == null)
+      .map(copy);
+  }
+
+  recordFindingIssue({ repositoryId, findingId, issueNumber, issueUrl }) {
+    const key = `${repositoryId}:${findingId}`;
+    const existing = this.#findingIssues.get(key);
+    if (!existing) throw new Error(`finding issue publication does not exist: ${repositoryId}:${findingId}`);
+    this.#findingIssues.set(key, {
+      ...existing,
+      issueNumber,
+      issueUrl,
+      status: "published",
+      lastError: undefined,
+    });
+  }
+
+  recordFindingIssueFailure({ repositoryId, findingId, error }) {
+    const key = `${repositoryId}:${findingId}`;
+    const issue = this.#findingIssues.get(key);
+    if (!issue) throw new Error(`finding issue publication does not exist: ${repositoryId}:${findingId}`);
+    issue.status = "failed";
+    issue.lastError = error;
   }
 
   recordContextDecisions({ repositoryId, commitSha, reviewResult }) {

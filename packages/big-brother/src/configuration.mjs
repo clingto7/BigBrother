@@ -66,6 +66,13 @@ export function validateConfiguration(configuration) {
 		if (typeof repository.stateNamespace !== "string" || repository.stateNamespace.length === 0) {
 			errors.push(`${prefix}.stateNamespace must be a non-empty string`);
 		}
+		if (
+			repository.reviewFindingIssueLabels !== undefined &&
+			(!Array.isArray(repository.reviewFindingIssueLabels) ||
+				repository.reviewFindingIssueLabels.some((label) => typeof label !== "string" || label.length === 0))
+		) {
+			errors.push(`${prefix}.reviewFindingIssueLabels must contain non-empty strings`);
+		}
 		validateCredentialRefs(repository, prefix, errors);
 		for (const field of ["provider", "model"]) {
 			if (repository[field] !== undefined) errors.push(`${prefix}.${field} is Prime-owned; configure it with 'big-brother agent'`);
@@ -83,6 +90,7 @@ function normalizeConfiguration(configuration) {
 			cloneUrl: repository.cloneUrl,
 			trackedBranches: [...new Set(repository.trackedBranches)],
 			stateNamespace: repository.stateNamespace,
+			reviewFindingIssueLabels: [...new Set(repository.reviewFindingIssueLabels ?? [])],
 			credentials: repository.credentials ? { ...repository.credentials } : {},
 		})),
 	};

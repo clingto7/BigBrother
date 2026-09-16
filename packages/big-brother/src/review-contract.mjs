@@ -13,6 +13,7 @@ const REQUIRED_FIELDS = [
   "limitations",
   "candidate_facts",
   "context_decisions",
+  "finding_issue_intents",
 ];
 
 export function validateReviewResult(result) {
@@ -26,7 +27,7 @@ export function validateReviewResult(result) {
     if (!(field in result)) errors.push(`missing field: ${field}`);
   }
 
-  for (const field of ["observed_branches", "findings", "policy_checks", "evidence", "limitations", "candidate_facts", "context_decisions"]) {
+  for (const field of ["observed_branches", "findings", "policy_checks", "evidence", "limitations", "candidate_facts", "context_decisions", "finding_issue_intents"]) {
     if (field in result && !Array.isArray(result[field])) errors.push(`${field} must be an array`);
   }
 
@@ -50,10 +51,21 @@ export function validateReviewResult(result) {
   if (result.conclusion === "clean" && Array.isArray(result.context_decisions) && result.context_decisions.length > 0) {
     errors.push("clean review cannot contain context decisions");
   }
+  if (result.conclusion === "clean" && Array.isArray(result.finding_issue_intents) && result.finding_issue_intents.length > 0) {
+    errors.push("clean review cannot contain finding issue intents");
+  }
 
   if (Array.isArray(result.findings) && Array.isArray(result.evidence)) {
     const evidenceIds = new Set(result.evidence.map((item) => item?.id));
+    const findingIds = new Set();
     for (const finding of result.findings) {
+      if (typeof finding?.id !== "string" || finding.id.length === 0) {
+        errors.push("finding must have a non-empty stable id");
+      } else if (findingIds.has(finding.id)) {
+        errors.push(`duplicate finding id: ${finding.id}`);
+      } else {
+        findingIds.add(finding.id);
+      }
       if (!Array.isArray(finding?.evidence_refs) || finding.evidence_refs.length === 0) {
         errors.push(`finding ${finding?.id ?? "<unknown>"} must cite evidence`);
         continue;
@@ -61,6 +73,22 @@ export function validateReviewResult(result) {
       for (const evidenceRef of finding.evidence_refs) {
         if (!evidenceIds.has(evidenceRef)) {
           errors.push(`finding ${finding?.id ?? "<unknown>"} cites unknown evidence: ${evidenceRef}`);
+        }
+      }
+    }
+
+    if (Array.isArray(result.finding_issue_intents)) {
+      const intendedFindings = new Set();
+      for (const intent of result.finding_issue_intents) {
+        const findingId = intent?.finding_id;
+        if (typeof findingId !== "string" || findingId.length === 0) {
+          errors.push("finding issue intent must have a non-empty finding_id");
+        } else if (!findingIds.has(findingId)) {
+          errors.push(`finding issue intent cites unknown finding: ${findingId}`);
+        } else if (intendedFindings.has(findingId)) {
+          errors.push(`duplicate finding issue intent: ${findingId}`);
+        } else {
+          intendedFindings.add(findingId);
         }
       }
     }
