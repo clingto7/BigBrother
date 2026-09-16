@@ -222,7 +222,7 @@ export async function runWatch(configuration, options, { stdout = console.log, s
 			for (const service of services) {
 				try {
 					const result = await runRepositoryCycle(service);
-					stdout(`${service.profile.repositoryId}: discovered=${result.discovered} processed=${result.processed} failed=${result.failed}`);
+					stdout(`${service.profile.repositoryId}: discovered=${result.discovered} processed=${result.processed} failed=${result.failed} publication-retried=${result.retriedFindingIssues} publication-pending=${result.findingIssuePending.length} publication-failed=${result.findingIssueFailures.length}`);
 					for (const failure of result.findingIssueFailures) {
 						stderr(`${service.profile.repositoryId}: finding ${failure.findingId}: ${failure.lastError}`);
 					}

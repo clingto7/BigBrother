@@ -28,6 +28,7 @@ export class SqliteJobStore {
         commit_sha TEXT NOT NULL,
         status TEXT NOT NULL,
         check_run_id INTEGER,
+        review_result_json TEXT,
         PRIMARY KEY (repository_id, commit_sha)
       );
       CREATE TABLE IF NOT EXISTS review_job_branches (
@@ -72,6 +73,7 @@ export class SqliteJobStore {
     `);
     const columns = this.#db.prepare(`PRAGMA table_info(review_jobs)`).all().map((row) => row.name);
     if (!columns.includes("check_run_id")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN check_run_id INTEGER`);
+    if (!columns.includes("review_result_json")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN review_result_json TEXT`);
     const findingIssueColumns = this.#db.prepare(`PRAGMA table_info(review_finding_issues)`).all().map((row) => row.name);
     for (const [name, definition] of [
       ["desired_lifecycle_status", "TEXT NOT NULL DEFAULT 'active'"],
@@ -180,6 +182,21 @@ export class SqliteJobStore {
       .prepare(`UPDATE review_jobs SET status = ? WHERE repository_id = ? AND commit_sha = ?`)
       .run(status, repositoryId, commitSha);
     if (Number(result.changes) !== 1) throw new Error(`review job does not exist: ${repositoryId}:${commitSha}`);
+  }
+
+  recordReviewResult({ repositoryId, commitSha, reviewResult }) {
+    assertReviewResultIdentity({ repositoryId, commitSha, reviewResult });
+    const result = this.#db
+      .prepare(`UPDATE review_jobs SET review_result_json = ? WHERE repository_id = ? AND commit_sha = ?`)
+      .run(JSON.stringify(reviewResult), repositoryId, commitSha);
+    if (Number(result.changes) !== 1) throw new Error(`review job does not exist: ${repositoryId}:${commitSha}`);
+  }
+
+  getReviewResult({ repositoryId, commitSha }) {
+    const row = this.#db
+      .prepare(`SELECT review_result_json FROM review_jobs WHERE repository_id = ? AND commit_sha = ?`)
+      .get(repositoryId, commitSha);
+    return row?.review_result_json ? JSON.parse(row.review_result_json) : undefined;
   }
 
   listReviewJobs(repositoryId) {
@@ -416,3 +433,13 @@ export class SqliteJobStore {
 }
 
 const REVIEW_JOB_STATUSES = new Set(["pending", "reviewing", "completed", "failed"]);
+
+function assertReviewResultIdentity({ repositoryId, commitSha, reviewResult }) {
+  if (
+    !reviewResult ||
+    reviewResult.repository_id !== repositoryId ||
+    reviewResult.commit_sha !== commitSha
+  ) {
+    throw new Error(`review result does not match review job: ${repositoryId}:${commitSha}`);
+  }
+}

@@ -92,6 +92,11 @@ export class ReviewCoordinator {
 				reviewResult,
 			});
 		}
+		store.recordReviewResult?.({
+			repositoryId: job.repositoryId,
+			commitSha: job.commitSha,
+			reviewResult,
+		});
 
 		return { reviewInput, reviewResult, published, findingIssues, workspace };
 	}

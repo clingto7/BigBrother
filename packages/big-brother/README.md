@@ -12,8 +12,9 @@ Current public seams:
 - `InMemoryJobStore`: test adapter for branch enrollment, repository+SHA review
   deduplication, and repository-scoped Context Ledger behavior.
 - `SqliteJobStore`: persistent service-state Adapter using Node's built-in
-  `node:sqlite`; it restores cursors, review jobs, and provenance-carrying
-  Context Ledger decisions after restart.
+  `node:sqlite`; it restores cursors, review jobs, completed Review records,
+  finding publication state, and provenance-carrying Context Ledger decisions
+  after restart.
 - `pollRepository`: control-plane poller that consumes a GitHub Adapter,
   enqueues every commit after the branch cursor, and advances the cursor only
   after the range reaches the observed head.

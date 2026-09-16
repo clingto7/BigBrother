@@ -12,6 +12,7 @@ export class InMemoryJobStore {
   // ponytail: in-memory only; replace at the Job Store seam before multi-process watch.
   #branches = new Map();
   #reviewJobs = new Map();
+  #reviewResults = new Map();
   #contextDecisions = new Map();
   #findingIssues = new Map();
 
@@ -84,6 +85,19 @@ export class InMemoryJobStore {
     const job = this.#reviewJobs.get(`${repositoryId}:${commitSha}`);
     if (!job) throw new Error(`review job does not exist: ${repositoryId}:${commitSha}`);
     job.status = status;
+  }
+
+  recordReviewResult({ repositoryId, commitSha, reviewResult }) {
+    assertReviewResultIdentity({ repositoryId, commitSha, reviewResult });
+    if (!this.#reviewJobs.has(`${repositoryId}:${commitSha}`)) {
+      throw new Error(`review job does not exist: ${repositoryId}:${commitSha}`);
+    }
+    this.#reviewResults.set(`${repositoryId}:${commitSha}`, copy(reviewResult));
+  }
+
+  getReviewResult({ repositoryId, commitSha }) {
+    const result = this.#reviewResults.get(`${repositoryId}:${commitSha}`);
+    return result ? copy(result) : undefined;
   }
 
   listReviewJobs(repositoryId) {
@@ -243,3 +257,13 @@ export class InMemoryJobStore {
 }
 
 const REVIEW_JOB_STATUSES = new Set(["pending", "reviewing", "completed", "failed"]);
+
+function assertReviewResultIdentity({ repositoryId, commitSha, reviewResult }) {
+  if (
+    !reviewResult ||
+    reviewResult.repository_id !== repositoryId ||
+    reviewResult.commit_sha !== commitSha
+  ) {
+    throw new Error(`review result does not match review job: ${repositoryId}:${commitSha}`);
+  }
+}

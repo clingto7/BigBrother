@@ -10,6 +10,7 @@
 - 发现 branch cursor 之后的每一个 commit；
 - 在固定 commit workspace 中检查 commit message、message template、项目策略和 diff；
 - 使用一个长期运行的 Prime session 保存仓库级上下文；
+- 保存每个已完成 Review record，并将 Prime 批准的 actionable finding 映射到 watched Repository 的 Review finding issue；
 - 为每个 commit 发布一个 advisory GitHub Commit Status；
 - 在进程重启后从 SQLite state 继续处理未完成 job。
 
@@ -247,6 +248,23 @@ big-brother watch \
 首次 watch 只建立当前 branch head baseline，所以不会因为启动服务而自动审查整个历史。之后 branch 出现新 commit，poller 会沿 commit range 逐个建立 job。
 
 按 `Ctrl-C` 或发送 `SIGTERM` 停止。重新启动时复用相同 `stateNamespace`，SQLite cursor 和未完成 job 会继续生效；不要为了“重置”而删除 state 目录，除非确认要丢弃审查进度。
+
+每轮 watch 输出中的 `processed` 表示完成的 Review；`publication-retried`、
+`publication-pending` 和 `publication-failed` 分别表示 Review finding issue
+发布的恢复次数、待处理数量和失败数量。Review 已完成并不等于 GitHub
+Issue 发布一定成功：Issues 权限或网络故障只会留下可重试的 publication work，
+下一轮或重启后的第一轮会先按 stable finding identity reconciliation，再继续创建、更新、关闭或重新打开同一个 issue。`big-brother/review`
+Commit Status 仍会独立发布。
+
+### Development issue 与 Review finding issue
+
+Big Brother 自己的 GitHub 仓库使用 Development issue 记录功能、缺陷和运维工作；本 issue
+就是这一类 Development issue。Big Brother 不会把 watched Repository 的审查发现写回这里。
+
+watched Repository 中的 Review finding issue 则是由 Repository Prime 明确批准的、带证据的
+审查后续事项。它使用 watched Repository 的 GitHub Issues、Big Brother 的发布标签和 stable
+finding identity；clean review、被 Prime 拒绝的 worker assertion 和 non-actionable observation
+不会创建 issue。后续 commit 也不会自动关闭 issue，只有 Prime 明确发出 resolve intent 才会关闭。
 
 长期部署时，`watch` 保持为前台进程，由主机服务管理器负责拉起、重启和日志管理。CLI 已提供 macOS `launchd` 与 Linux `systemd` 服务定义渲染；不要让服务文件自行复制轮询逻辑，也不要把 token 写进服务文件。
 
