@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ReviewCoordinator, SqliteJobStore, runRepositoryCycle } from "../src/index.mjs";
+import { ReviewCoordinator, SqliteJobStore, retryReviewFindingIssues, runRepositoryCycle } from "../src/index.mjs";
 
 test("a completed repository cycle publishes and durably maps a Prime-approved finding issue", async () => {
 	const store = preparedStore();
@@ -144,6 +144,42 @@ test("an Issues permission failure leaves Commit Status published and records a 
 	store.close();
 });
 
+test("a resolution for an unmapped finding never creates a new closed issue", async () => {
+	const store = preparedStore();
+	let creations = 0;
+	let firstAttempt = true;
+	const github = {
+		async createCommitStatus() {
+			return { id: 7 };
+		},
+		async createIssue() {
+			if (firstAttempt) {
+				firstAttempt = false;
+				throw new Error("initial creation failed");
+			}
+			creations += 1;
+			throw new Error("creation should not be attempted for resolution-only intent");
+		},
+	};
+
+	await coordinatorReturning(actionableReview()).process(cycleInput(store, github));
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-4", branchName: "main" });
+	const cleanReview = actionableReview({
+		commit_sha: "commit-4",
+		parent_sha: "commit-3",
+		conclusion: "clean",
+		findings: [],
+		evidence: [],
+		finding_issue_intents: [{ finding_id: "auth-null-bypass", action: "resolve" }],
+	});
+
+	await coordinatorReturning(cleanReview).process(cycleInput(store, github, cleanReview));
+
+	assert.equal(creations, 0);
+	assert.equal(store.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).issueNumber, undefined);
+	store.close();
+});
+
 test("a GitHub adapter without Issues capability records a clear configuration failure", async () => {
 	const store = preparedStore();
 	const github = {
@@ -186,12 +222,57 @@ test("a cycle reconciles an issue created before its local mapping was recorded"
 			async createIssue() {
 				creations += 1;
 			},
+			async updateIssue(input) {
+				return { number: input.issueNumber, html_url: "https://github.com/acme/app/issues/42", state: input.state };
+			},
 		};
 		const cycle = await runRepositoryCycle(repositoryService({ store: reopenedStore, github, submissions: [] }));
 
 		assert.equal(cycle.retriedFindingIssues, 1);
 		assert.equal(creations, 0);
 		assert.equal(reopenedStore.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).issueNumber, 42);
+		reopenedStore.close();
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("marker-only reconciliation refreshes the remote issue before marking it published", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "big-brother-finding-marker-reconcile-"));
+	const filePath = join(directory, "state.sqlite");
+	try {
+		const firstStore = preparedStore(filePath);
+		firstStore.stageFindingIssue({
+			repositoryId: "acme/app",
+			findingId: "auth-null-bypass",
+			commitSha: "commit-3",
+			title: "Null authorization bypass",
+			body: "<!-- big-brother-finding-id: auth-null-bypass -->",
+			labels: ["big-brother"],
+		});
+		firstStore.recordFindingIssueFailure({
+			repositoryId: "acme/app",
+			findingId: "auth-null-bypass",
+			error: "indeterminate publication",
+		});
+		firstStore.close();
+
+		const reopenedStore = new SqliteJobStore(filePath);
+		const updates = [];
+		const github = {
+			async findIssueByFindingId() {
+				return { number: 42, html_url: "https://github.com/acme/app/issues/42" };
+			},
+			async updateIssue(input) {
+				updates.push(input);
+				return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: input.state };
+			},
+		};
+
+		assert.equal(await retryReviewFindingIssues({ github, store: reopenedStore, repositoryId: "acme/app" }), 1);
+		assert.equal(updates.length, 1);
+		assert.equal(updates[0].state, "open");
+		assert.equal(reopenedStore.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).status, "published");
 		reopenedStore.close();
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
@@ -489,8 +570,11 @@ function coordinatorReturning(reviewResult, submissions = []) {
 			async start() {
 				return { repositoryId: "acme/app" };
 			},
-			async submitReview() {
+			async submitWorkerReview() {
 				submissions.push(reviewResult.commit_sha);
+				return workerResult(reviewResult);
+			},
+			async reconcileReview() {
 				return structuredClone(reviewResult);
 			},
 		},
@@ -573,4 +657,9 @@ function actionableReview(overrides = {}) {
 		finding_issue_intents: [{ finding_id: "auth-null-bypass" }],
 		...overrides,
 	};
+}
+
+function workerResult(reviewResult) {
+	const { context_decisions: _contextDecisions, finding_issue_intents: _findingIssueIntents, ...result } = reviewResult;
+	return result;
 }

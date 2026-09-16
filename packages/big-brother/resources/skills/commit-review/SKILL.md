@@ -5,7 +5,7 @@ description: Review one immutable GitHub commit against its parent, message temp
 
 # Commit review
 
-Use this procedure for each host-supplied `ReviewInput`:
+Use this procedure for each host-supplied `ReviewInput` during the worker pass:
 
 1. Confirm the repository, commit SHA, parent SHA, and observed branches. Never
    substitute a moving branch head for the supplied commit.
@@ -18,17 +18,18 @@ Use this procedure for each host-supplied `ReviewInput`:
    policy violations, or message problems supported by concrete evidence.
 5. Do not execute project code, tests, builds, scripts, package managers, or
    dependency installation in the static profile.
-6. Produce the complete `ReviewResult`, including clean checks and limitations.
+6. Produce the worker review result, including clean checks and limitations.
    Findings without evidence references are invalid.
-7. Keep worker `candidate_facts` separate from Prime `context_decisions`. Emit a
-   context decision only when Repository Prime admits, corrects, supersedes, or
-   retracts a fact using cited repository evidence.
-8. Emit a `finding_issue_intents` entry only for an evidence-backed finding that
-   Repository Prime explicitly classifies as actionable. Use the finding's stable
-   `id` as `finding_id`; rejected and non-actionable assertions emit no intent.
-   To resolve an existing mapped finding, emit `{ "finding_id": "...", "action":
-   "resolve" }` explicitly; a later clean review without that intent must not
-   close the issue.
+7. Keep `candidate_facts` as worker proposals. The worker emits neither
+   `context_decisions` nor `finding_issue_intents`; the Repository Prime owns
+   those fields during reconciliation.
+
+The Repository Prime then receives this worker result and the canonical context.
+It independently checks the evidence, synthesizes the final `ReviewResult`, and
+may admit, correct, supersede, or retract facts. It emits a finding issue intent
+only for an evidence-backed finding it explicitly classifies as actionable. To
+resolve an existing mapped finding, it emits `{ "finding_id": "...", "action":
+"resolve" }`; a later clean review without that intent must not close the issue.
 
 ## Evidence discipline
 

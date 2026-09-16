@@ -296,8 +296,11 @@ function coordinatorReturning(reviewResult, submittedInputs = [], publisher = as
 			async start() {
 				return { repositoryId: "acme/app" };
 			},
-			async submitReview(_handle, input) {
+			async submitWorkerReview(_handle, input) {
 				submittedInputs.push(structuredClone(input));
+				return workerResult(reviewResult);
+			},
+			async reconcileReview(_handle) {
 				return structuredClone(reviewResult);
 			},
 		},
@@ -310,6 +313,11 @@ function coordinatorReturning(reviewResult, submittedInputs = [], publisher = as
 		}),
 		publisher,
 	});
+}
+
+function workerResult(reviewResult) {
+	const { context_decisions: _contextDecisions, finding_issue_intents: _findingIssueIntents, ...result } = reviewResult;
+	return result;
 }
 
 function cycleInput(store, commitSha = "commit-3") {

@@ -11,7 +11,8 @@ export {
 	PrimeRpcRuntime,
 	PrimeRpcRuntimeFactory,
 	buildPrimeRpcLaunchOptions,
-	buildReviewPrompt,
+	buildWorkerReviewPrompt,
+	buildPrimeReconciliationPrompt,
 	parseReviewResult,
 } from "./prime-rpc-runtime.mjs";
 export { createReviewerProfile, loadReviewerResources } from "./reviewer-profile.mjs";
@@ -20,5 +21,9 @@ export { SqliteJobStore } from "./sqlite-job-store.mjs";
 export { GitCliAdapter, WorkspaceManager } from "./workspace.mjs";
 export { GitReviewEvidenceAdapter } from "./git-review-evidence.mjs";
 export { isProjectPolicyPath, selectPolicySnapshot } from "./policy-resolver.mjs";
-export { validateReviewResult } from "./review-contract.mjs";
+export {
+	assertReviewResultIdentity,
+	validateReviewResult,
+	validateWorkerReviewResult,
+} from "./review-contract.mjs";
 export { renderLaunchdPlist, renderSystemdUnit } from "./service-manifests.mjs";

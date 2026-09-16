@@ -135,9 +135,12 @@ function createService(store, github, submissions) {
 				async start() {
 					return { repositoryId: "acme/app" };
 				},
-				async submitReview(_handle, input) {
+				async submitWorkerReview(_handle, input) {
 					submissions.push(structuredClone(input));
-					return structuredClone(reviewResultFor(input.commit_sha));
+					return workerResultFor(input.commit_sha);
+				},
+				async reconcileReview(_handle, { reviewInput }) {
+					return structuredClone(reviewResultFor(reviewInput.commit_sha));
 				},
 			},
 			evidenceProvider: async ({ job }) => ({
@@ -187,4 +190,10 @@ function reviewResultFor(commitSha) {
 		}],
 		finding_issue_intents: [{ finding_id: "auth-null-bypass" }],
 	};
+}
+
+function workerResultFor(commitSha) {
+	const result = reviewResultFor(commitSha);
+	const { context_decisions: _contextDecisions, finding_issue_intents: _findingIssueIntents, ...worker } = result;
+	return worker;
 }

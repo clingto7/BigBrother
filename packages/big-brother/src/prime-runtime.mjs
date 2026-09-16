@@ -38,11 +38,24 @@ export class PrimeRuntimeSupervisor {
     return handle;
   }
 
-  submitReview(handle, reviewInput) {
+  submitWorkerReview(handle, reviewInput) {
+    return this.#submit(handle, "submitWorkerReview", reviewInput);
+  }
+
+  reconcileReview(handle, reconciliationInput) {
+    return this.#submit(handle, "reconcileReview", reconciliationInput);
+  }
+
+	#submit(handle, method, input) {
     const entry = this.#entryFor(handle);
     return entry.startPromise.then(() => {
       // ponytail: serialize per repository until context-conflict handling exists.
-      const run = entry.queue.then(() => entry.runtime.submitReview(reviewInput));
+      const run = entry.queue.then(() => {
+        if (typeof entry.runtime[method] !== "function") {
+          throw new Error(`Prime runtime does not support ${method}`);
+        }
+        return entry.runtime[method](input);
+      });
       entry.queue = run.catch(() => undefined);
       return run;
     });

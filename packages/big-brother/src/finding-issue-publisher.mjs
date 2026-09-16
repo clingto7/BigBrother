@@ -9,7 +9,10 @@ export async function publishReviewFindingIssues({ github, store, reviewResult, 
 		const findingId = intent.finding_id;
 		if (findingIssueIntentAction(intent) === "resolve") {
 			const existing = store.getFindingIssue({ repositoryId: reviewResult.repository_id, findingId });
-			if (!existing) continue;
+			// A resolution is meaningful only for an issue that Big Brother has
+			// durably mapped. A pending/failed creation must never be turned into a
+			// newly-created-and-immediately-closed issue.
+			if (!existing || existing.issueNumber == null) continue;
 			store.stageFindingIssueResolution({
 				repositoryId: reviewResult.repository_id,
 				findingId,
@@ -84,7 +87,7 @@ async function attemptPublication({ github, store, publication, reconcile }) {
 		}
 
 		const desiredState = lifecycleStatus === "resolved" ? "closed" : "open";
-		const updateRequired = shouldUpdateIssue({ issue, publication, desiredState, created, reconcile });
+		const updateRequired = shouldUpdateIssue({ issue, publication, desiredState, created });
 		if (updateRequired && typeof github.updateIssue !== "function") {
 			throw new Error("GitHub adapter cannot update a mapped finding issue");
 		}
@@ -111,12 +114,12 @@ async function attemptPublication({ github, store, publication, reconcile }) {
 	return store.getFindingIssue({ repositoryId, findingId });
 }
 
-function shouldUpdateIssue({ issue, publication, desiredState, created, reconcile }) {
+function shouldUpdateIssue({ issue, publication, desiredState, created }) {
 	if (created) return desiredState === "closed";
 	if (issue.state === undefined && issue.body === undefined && issue.title === undefined && issue.labels === undefined) {
 		// A marker-only reconciliation response proves identity but cannot prove
 		// whether the idempotent update already reached GitHub.
-		return !reconcile && publication.status !== "published";
+		return true;
 	}
 	return issue.state !== desiredState ||
 		(issue.title !== undefined && issue.title !== publication.title) ||

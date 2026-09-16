@@ -1,7 +1,11 @@
 import { buildReviewInput } from "./review-input.mjs";
 import { publishReviewFindingIssues } from "./finding-issue-publisher.mjs";
 import { publishReviewResult } from "./publisher.mjs";
-import { validateReviewResult } from "./review-contract.mjs";
+import {
+	assertReviewResultIdentity,
+	validateReviewResult,
+	validateWorkerReviewResult,
+} from "./review-contract.mjs";
 
 /**
  * Coordinates one admitted job without putting polling or GitHub knowledge in
@@ -64,9 +68,26 @@ export class ReviewCoordinator {
 			runtimeProfile,
 			repositoryProfile.stateNamespace,
 		);
-		const reviewResult = await this.#runtimeSupervisor.submitReview(handle, reviewInput);
+		const workerResult = await this.#runtimeSupervisor.submitWorkerReview(handle, reviewInput);
+		const workerValidation = validateWorkerReviewResult(workerResult);
+		if (!workerValidation.ok) throw new Error(`invalid worker review result: ${workerValidation.errors.join("; ")}`);
+		assertReviewResultIdentity({
+			repositoryId: job.repositoryId,
+			commitSha: job.commitSha,
+			reviewResult: workerResult,
+		});
+		const reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
+			reviewInput,
+			workerResult,
+			canonicalContext,
+		});
 		const validation = validateReviewResult(reviewResult);
 		if (!validation.ok) throw new Error(`invalid review result: ${validation.errors.join("; ")}`);
+		assertReviewResultIdentity({
+			repositoryId: job.repositoryId,
+			commitSha: job.commitSha,
+			reviewResult,
+		});
 		if (reviewResult.context_decisions.length > 0) {
 			store.validateContextDecisions({
 				repositoryId: job.repositoryId,
@@ -98,6 +119,6 @@ export class ReviewCoordinator {
 			reviewResult,
 		});
 
-		return { reviewInput, reviewResult, published, findingIssues, workspace };
+		return { reviewInput, workerResult, reviewResult, published, findingIssues, workspace };
 	}
 }

@@ -6,8 +6,9 @@ Big Brother is an independent Prime-derived agent with a deterministic control
 plane around a long-lived Repository Prime runtime. The control plane owns
 observation, job identity, repository materialization, policy input selection,
 and GitHub publication. Repository Prime owns the durable repository
-conversation and invokes an isolated Commit-review worker for each commit
-review.
+conversation and reconciles a bounded Commit-review worker result for each
+commit review. The current static profile keeps the worker/reconciliation
+protocol explicit while native isolated child execution remains a later profile.
 
 The control plane is not an LLM loop. Repository Prime is not the GitHub
 poller, and a Commit-review worker is not the repository's final reviewer. This
@@ -15,11 +16,12 @@ separation is the central design seam: deterministic state transitions can be
 tested without a model, while Prime retains the project-level reasoning that
 benefits from a long-lived context.
 
-For each repository, Repository Prime is the long-lived main agent. It admits
-a bounded child worker for each immutable commit, receives the worker's
-evidence-backed proposal, zooms out over the repository context, and produces
-the final Review record. The worker cannot publish or update the Context
-Ledger directly.
+For each repository, Repository Prime is the long-lived main agent. The review
+adapter obtains a bounded worker proposal for each immutable commit, gives that
+proposal to Prime with the durable repository context, and receives the final
+Review record. The worker cannot publish or update the Context Ledger directly.
+An isolated child worker is the target for a future RLM/Pi execution profile,
+not a claim about the current no-tools profile.
 
 ## Relationship to Prime and Sifu
 
@@ -191,7 +193,8 @@ repository runtime. It should expose only lifecycle and job-delivery behavior:
 
 ```text
 start(repository_profile, state_namespace) -> RuntimeHandle
-submit_review(runtime_handle, review_input) -> ReviewAttempt
+submit_worker_review(runtime_handle, review_input) -> WorkerReviewResult
+reconcile_review(runtime_handle, reconciliation_input) -> ReviewResult
 recover(runtime_handle) -> RuntimeStatus
 stop(runtime_handle) -> void
 ```
@@ -208,11 +211,14 @@ the Policy Resolver and passed as evidence, rather than being implicitly
 loaded as runtime instructions. Native RLM is a future execution profile, not
 an enabled capability of the initial no-execution profile.
 
-For each review input, Repository Prime launches an isolated Commit-review
-worker. The worker is given the fixed commit, selected policy, canonical
-context, and the review contract. Its result returns through a structured
-artifact or explicit parent message; an admission handle alone is never
-treated as a completed review.
+For each review input, the adapter exposes two explicit phases. The bounded
+Commit-review worker receives the fixed commit and selected policy and returns
+evidence-backed findings plus candidate facts. Repository Prime then receives
+that worker result together with the canonical context, reconciles it, and
+returns the final ReviewResult. The worker cannot emit durable context decisions
+or issue intents. The initial static profile implements the worker and
+reconciliation passes through the structured Prime RPC seam; enabling native
+isolated RLM/Pi workers remains a separate execution-profile decision.
 
 ### Review Contract
 
@@ -235,13 +241,17 @@ ReviewResult {
   evidence[]
   limitations[]
   candidate_facts[]
+  context_decisions[]
+  finding_issue_intents[]
 }
 ```
 
 Every finding needs an evidence reference. A finding without a verifiable
 source location or commit-level basis is a limitation or suggestion, not an
-asserted violation. The contract is versioned independently from Prime's
-runtime protocol.
+asserted violation. The worker result uses the same review evidence fields but
+omits `context_decisions` and `finding_issue_intents`; only the reconciled
+ReviewResult above can reach publication or the Context Ledger. The contract is
+versioned independently from Prime's runtime protocol.
 
 ### Context Ledger
 

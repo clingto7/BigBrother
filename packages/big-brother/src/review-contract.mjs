@@ -16,6 +16,45 @@ const REQUIRED_FIELDS = [
   "finding_issue_intents",
 ];
 
+const WORKER_REQUIRED_FIELDS = REQUIRED_FIELDS.filter(
+	(field) => field !== "context_decisions" && field !== "finding_issue_intents",
+);
+
+export function validateWorkerReviewResult(result) {
+	const errors = [];
+	if (!result || typeof result !== "object") {
+		return { ok: false, errors: ["worker review result must be an object"] };
+	}
+
+	for (const field of WORKER_REQUIRED_FIELDS) {
+		if (!(field in result)) errors.push(`missing field: ${field}`);
+	}
+	if (Array.isArray(result.context_decisions) && result.context_decisions.length > 0) {
+		errors.push("worker review cannot contain context decisions");
+	}
+	if (Array.isArray(result.finding_issue_intents) && result.finding_issue_intents.length > 0) {
+		errors.push("worker review cannot contain finding issue intents");
+	}
+
+	const validation = validateReviewResult({
+		...result,
+		context_decisions: [],
+		finding_issue_intents: [],
+	});
+	errors.push(...validation.errors.filter((error) => !error.startsWith("missing field: ")));
+	return { ok: errors.length === 0, errors };
+}
+
+export function assertReviewResultIdentity({ repositoryId, commitSha, reviewResult }) {
+	if (
+		!reviewResult ||
+		reviewResult.repository_id !== repositoryId ||
+		reviewResult.commit_sha !== commitSha
+	) {
+		throw new Error(`review result does not match review job: ${repositoryId}:${commitSha}`);
+	}
+}
+
 export function validateReviewResult(result) {
   const errors = [];
 

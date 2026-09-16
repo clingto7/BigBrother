@@ -5,6 +5,8 @@ import {
   InMemoryJobStore,
   pollRepository,
   selectPolicySnapshot,
+  assertReviewResultIdentity,
+  validateWorkerReviewResult,
   validateReviewResult,
 } from "../src/index.mjs";
 
@@ -137,6 +139,39 @@ test("a review result is accepted only when every finding cites returned evidenc
   });
 
   assert.deepEqual(valid, { ok: true, errors: [] });
+});
+
+test("a worker result cannot contain Prime decisions or issue intents", () => {
+	const result = validateWorkerReviewResult({
+		repository_id: "acme/app",
+		commit_sha: "commit-2",
+		parent_sha: "commit-1",
+		observed_branches: ["main"],
+		conclusion: "findings",
+		message_check: { status: "pass" },
+		findings: [{ id: "finding-1", evidence_refs: ["E1"] }],
+		policy_checks: [],
+		evidence: [{ id: "E1", path: "src/app.ts", line: 12 }],
+		limitations: [],
+		candidate_facts: [],
+		context_decisions: [{ id: "decision-1" }],
+		finding_issue_intents: [{ finding_id: "finding-1" }],
+	});
+
+	assert.equal(result.ok, false);
+	assert.match(result.errors.join("\n"), /worker review cannot contain context decisions/);
+	assert.match(result.errors.join("\n"), /worker review cannot contain finding issue intents/);
+});
+
+test("review identity is bound to the admitted repository job", () => {
+	assert.throws(
+		() => assertReviewResultIdentity({
+			repositoryId: "acme/app",
+			commitSha: "commit-2",
+			reviewResult: { repository_id: "attacker/app", commit_sha: "commit-2" },
+		}),
+		/review result does not match review job: acme\/app:commit-2/,
+	);
 });
 
 test("a finding without evidence is rejected by the review contract", () => {

@@ -19,13 +19,31 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 				events.push(["start", profile.repositoryId, stateNamespace, profile.cwd]);
 				return runtimeHandle;
 			},
-			async submitReview(handle, input) {
-				events.push(["submit", handle, input]);
+			async submitWorkerReview(handle, input) {
+				events.push(["submit-worker", handle, input]);
 				return {
 					repository_id: input.repository_id,
 					commit_sha: input.commit_sha,
 					parent_sha: input.parent_sha,
 					observed_branches: input.observed_branches,
+					conclusion: "clean",
+					message_check: { status: "pass" },
+					findings: [],
+					policy_checks: [],
+					evidence: [],
+					limitations: [],
+					candidate_facts: [],
+					context_decisions: [],
+					finding_issue_intents: [],
+				};
+			},
+			async reconcileReview(handle, input) {
+				events.push(["reconcile", handle, input]);
+				return {
+					repository_id: input.reviewInput.repository_id,
+					commit_sha: input.reviewInput.commit_sha,
+					parent_sha: input.reviewInput.parent_sha,
+					observed_branches: input.reviewInput.observed_branches,
 					conclusion: "clean",
 					message_check: { status: "pass" },
 					findings: [],
@@ -65,7 +83,7 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 		store: {},
 	});
 
-	assert.deepEqual(events.map(([operation]) => operation), ["materialize", "evidence", "start", "submit", "publish"]);
+	assert.deepEqual(events.map(([operation]) => operation), ["materialize", "evidence", "start", "submit-worker", "reconcile", "publish"]);
 	assert.deepEqual(events.find(([operation]) => operation === "start"), ["start", "acme/app", "/state/acme-app", "/work/commit-3"]);
 	assert.equal(result.reviewInput.workspace.read_only, true);
 	assert.equal(result.reviewInput.commit.parent_sha, "commit-2");
