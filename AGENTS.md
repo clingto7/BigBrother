@@ -2,7 +2,9 @@
 
 ### Issue tracker
 
-Issues and specs live in GitHub Issues. See `docs/agents/issue-tracker.md`.
+Big Brother's own development issues/specs use GitHub Issues. Review finding
+issues are published to the watched repository's GitHub Issues; native
+trackers are deferred. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

@@ -1,0 +1,16 @@
+{
+  "pollIntervalMs": 60000,
+  "repositories": [
+    {
+      "repositoryId": "owner/repository",
+      "cloneUrl": "git@github.com:owner/repository.git",
+      "trackedBranches": ["main"],
+      "stateNamespace": ".big-brother/state/owner-repository",
+      "credentials": {
+        "githubReadTokenEnv": "GITHUB_TOKEN",
+        "githubStatusTokenEnv": "GITHUB_STATUS_TOKEN",
+        "gitSshKeyPathEnv": "GITHUB_SSH_KEY_PATH"
+      }
+    }
+  ]
+}

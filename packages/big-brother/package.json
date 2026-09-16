@@ -1,0 +1,14 @@
+{
+  "name": "@local/big-brother-core",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "big-brother": "bin/big-brother"
+  },
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,29 @@
+#compdef big-brother
+
+_big_brother() {
+  local -a commands
+  commands=(
+    'agent:start the Big Brother Prime agent for login and model setup'
+    'config:validate Big Brother control-plane configuration'
+    'review:review one immutable commit'
+    'watch:continuously monitor configured repositories'
+    'service:render a platform service definition'
+    'completion:print shell completion script'
+  )
+  _arguments -C '1:command:->command' '*::options:->options'
+  case $state in
+    command) _describe 'command' commands ;;
+    options)
+      case $words[1] in
+        agent) _arguments ;;
+        config) _arguments '1:subcommand:(validate)' '--config[configuration file]:file:_files' ;;
+        review) _arguments '--config[configuration file]:file:_files' '--repo[GitHub owner/name]' '--commit[commit SHA]' ;;
+        watch) _arguments '--config[configuration file]:file:_files' '--once[run one polling cycle]' '--interval-ms[poll interval in milliseconds]' ;;
+        service)
+          _arguments '1:action:(render)' '2:platform:(launchd systemd)' '--config[configuration file]:file:_files' '--executable[absolute Big Brother executable]:file:_files' '--working-directory[service working directory]:directory:_directories' '--env-file[environment file]:file:_files' '--label[service label]' '--restart-seconds[restart delay]' ;;
+        completion) _values 'shell' bash zsh fish ;;
+      esac
+      ;;
+  esac
+}
+_big_brother "$@"
