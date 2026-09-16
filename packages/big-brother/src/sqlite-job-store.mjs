@@ -164,12 +164,10 @@ export class SqliteJobStore {
         source_commit_sha, source_review_id, evidence_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const proposed = buildContextDecisionRecords({ repositoryId, commitSha, reviewResult });
 
     this.#db.exec("BEGIN IMMEDIATE");
     try {
-      const existing = this.#listContextDecisionRecords(repositoryId);
-      for (const record of reconcileContextDecisionRecords(existing, proposed)) {
+      for (const record of this.#contextDecisionAdditions({ repositoryId, commitSha, reviewResult })) {
         insert.run(
           record.repositoryId,
           record.decisionId,
@@ -187,6 +185,10 @@ export class SqliteJobStore {
       this.#db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  validateContextDecisions(input) {
+    this.#contextDecisionAdditions(input);
   }
 
   getContextLedger(repositoryId) {
@@ -215,6 +217,12 @@ export class SqliteJobStore {
       },
       evidence: JSON.parse(row.evidence_json),
     }));
+  }
+
+  #contextDecisionAdditions({ repositoryId, commitSha, reviewResult }) {
+    const existing = this.#listContextDecisionRecords(repositoryId);
+    const proposed = buildContextDecisionRecords({ repositoryId, commitSha, reviewResult });
+    return reconcileContextDecisionRecords(existing, proposed);
   }
 
   close() {

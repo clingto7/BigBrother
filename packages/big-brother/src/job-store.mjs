@@ -92,11 +92,19 @@ export class InMemoryJobStore {
   }
 
   recordContextDecisions({ repositoryId, commitSha, reviewResult }) {
-    const existing = [...this.#contextDecisions.values()].filter((record) => record.repositoryId === repositoryId);
-    const proposed = buildContextDecisionRecords({ repositoryId, commitSha, reviewResult });
-    for (const record of reconcileContextDecisionRecords(existing, proposed)) {
+    for (const record of this.#contextDecisionAdditions({ repositoryId, commitSha, reviewResult })) {
       this.#contextDecisions.set(`${repositoryId}:${record.decisionId}`, record);
     }
+  }
+
+  validateContextDecisions(input) {
+    this.#contextDecisionAdditions(input);
+  }
+
+  #contextDecisionAdditions({ repositoryId, commitSha, reviewResult }) {
+    const existing = [...this.#contextDecisions.values()].filter((record) => record.repositoryId === repositoryId);
+    const proposed = buildContextDecisionRecords({ repositoryId, commitSha, reviewResult });
+    return reconcileContextDecisionRecords(existing, proposed);
   }
 
   getContextLedger(repositoryId) {

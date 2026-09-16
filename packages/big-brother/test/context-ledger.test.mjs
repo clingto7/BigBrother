@@ -10,21 +10,25 @@ test("a completed repository cycle admits Prime-approved context and recovers it
 	const directory = mkdtempSync(join(tmpdir(), "big-brother-context-ledger-"));
 	const filePath = join(directory, "state.sqlite");
 	const evidence = { id: "E1", commit_sha: "commit-3", path: "docs/policy.md", line: 4 };
-	const reviewResult = review({
+	const reviewResult = deterministicCycleResult({
 		evidence: [evidence],
-		candidate_facts: [
-			{ id: "worker-only", statement: "Worker assertions are not durable by themselves", evidence_refs: ["E1"] },
-		],
-		context_decisions: [
-			{
-				id: "decision-1",
-				action: "admit",
-				fact_id: "fact-review-policy",
-				statement: "Reviews follow docs/policy.md.",
-				evidence_refs: ["E1"],
-				rationale: "The repository policy states this explicitly.",
-			},
-		],
+		workerOutput: {
+			candidateFacts: [
+				{ id: "worker-only", statement: "Worker assertions are not durable by themselves", evidence_refs: ["E1"] },
+			],
+		},
+		primeDecision: {
+			contextDecisions: [
+				{
+					id: "decision-1",
+					action: "admit",
+					fact_id: "fact-review-policy",
+					statement: "Reviews follow docs/policy.md.",
+					evidence_refs: ["E1"],
+					rationale: "The repository policy states this explicitly.",
+				},
+			],
+		},
 	});
 
 	try {
@@ -185,6 +189,7 @@ test("a publication failure leaves the Context Ledger unchanged", async () => {
 
 test("Ledger reconciliation rejects impossible transitions atomically", async () => {
 	const store = new SqliteJobStore(":memory:");
+	let publications = 0;
 	store.enrollBranch({ repositoryId: "acme/app", branchName: "main", headSha: "commit-2" });
 	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-3", branchName: "main" });
 	const result = review({
@@ -195,7 +200,14 @@ test("Ledger reconciliation rejects impossible transitions atomically", async ()
 		],
 	});
 
-	await assert.rejects(coordinatorReturning(result).process(cycleInput(store)), /cannot correct unknown fact: fact-missing/i);
+	await assert.rejects(
+		coordinatorReturning(result, [], async () => {
+			publications += 1;
+			return { id: 7 };
+		}).process(cycleInput(store)),
+		/cannot correct unknown fact: fact-missing/i,
+	);
+	assert.equal(publications, 0);
 	assert.deepEqual(store.getContextLedger("acme/app"), []);
 	store.close();
 });
@@ -205,11 +217,14 @@ test("worker-only candidate facts and clean reviews leave the Context Ledger unc
 	store.enrollBranch({ repositoryId: "acme/app", branchName: "main", headSha: "commit-1" });
 	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-2", branchName: "main" });
 	await coordinatorReturning(
-		review({
+		deterministicCycleResult({
 			commit_sha: "commit-2",
 			parent_sha: "commit-1",
 			evidence: [{ id: "E1", commit_sha: "commit-2", path: "README.md" }],
-			candidate_facts: [{ id: "worker-1", statement: "Unadmitted worker claim", evidence_refs: ["E1"] }],
+			workerOutput: {
+				candidateFacts: [{ id: "worker-1", statement: "Unadmitted worker claim", evidence_refs: ["E1"] }],
+			},
+			primeDecision: { contextDecisions: [] },
 		}),
 	).process(cycleInput(store, "commit-2"));
 	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-3", branchName: "main" });
@@ -337,4 +352,12 @@ function review(overrides = {}) {
 		context_decisions: [],
 		...overrides,
 	};
+}
+
+function deterministicCycleResult({ workerOutput, primeDecision, ...reviewOverrides }) {
+	return review({
+		...reviewOverrides,
+		candidate_facts: structuredClone(workerOutput.candidateFacts),
+		context_decisions: structuredClone(primeDecision.contextDecisions),
+	});
 }
