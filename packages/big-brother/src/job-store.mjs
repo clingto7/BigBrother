@@ -105,10 +105,44 @@ export class InMemoryJobStore {
     });
   }
 
-  stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels }) {
+  getFindingIssueState({ repositoryId, findingId }) {
+    const issue = this.#findingIssues.get(`${repositoryId}:${findingId}`);
+    if (!issue) return undefined;
+    return copy({
+      ...this.getFindingIssue({ repositoryId, findingId }),
+      commitSha: issue.commitSha,
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+      lifecycleStatus: issue.lifecycleStatus,
+      publishedCommitSha: issue.publishedCommitSha,
+      publishedTitle: issue.publishedTitle,
+      publishedBody: issue.publishedBody,
+      publishedLabels: issue.publishedLabels,
+      publishedLifecycleStatus: issue.publishedLifecycleStatus,
+    });
+  }
+
+  stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels, lifecycleStatus = "active" }) {
     const key = `${repositoryId}:${findingId}`;
     const existing = this.#findingIssues.get(key);
-    if (existing?.issueNumber != null) return;
+    if (existing) {
+      const changed =
+        existing.commitSha !== commitSha ||
+        existing.title !== title ||
+        existing.body !== body ||
+        JSON.stringify(existing.labels) !== JSON.stringify(labels) ||
+        existing.lifecycleStatus !== lifecycleStatus;
+      Object.assign(existing, { commitSha, title, body, labels: copy(labels), lifecycleStatus });
+      if (existing.issueNumber == null) {
+        existing.status = "pending";
+        existing.lastError = undefined;
+      } else if (changed) {
+        existing.status = "pending";
+        existing.lastError = undefined;
+      }
+      return;
+    }
     this.#findingIssues.set(key, {
       repositoryId,
       findingId,
@@ -120,12 +154,35 @@ export class InMemoryJobStore {
       title,
       body,
       labels: copy(labels),
+      lifecycleStatus,
+      publishedCommitSha: undefined,
+      publishedTitle: undefined,
+      publishedBody: undefined,
+      publishedLabels: undefined,
+      publishedLifecycleStatus: undefined,
     });
+  }
+
+  stageFindingIssueResolution({ repositoryId, findingId, commitSha }) {
+    const issue = this.#findingIssues.get(`${repositoryId}:${findingId}`);
+    if (!issue) return;
+    issue.commitSha = commitSha;
+    issue.lifecycleStatus = "resolved";
+    if (issue.issueNumber == null) {
+      issue.status = "pending";
+      issue.lastError = undefined;
+    } else if (issue.publishedLifecycleStatus !== "resolved") {
+      issue.status = "pending";
+      issue.lastError = undefined;
+    }
   }
 
   listRetryableFindingIssues(repositoryId) {
     return [...this.#findingIssues.values()]
-      .filter((issue) => issue.repositoryId === repositoryId && issue.issueNumber == null)
+      .filter((issue) =>
+        issue.repositoryId === repositoryId &&
+        (issue.status === "pending" || issue.status === "failed")
+      )
       .map(copy);
   }
 
@@ -139,7 +196,20 @@ export class InMemoryJobStore {
       issueUrl,
       status: "published",
       lastError: undefined,
+      publishedCommitSha: existing.commitSha,
+      publishedTitle: existing.title,
+      publishedBody: existing.body,
+      publishedLabels: copy(existing.labels),
+      publishedLifecycleStatus: existing.lifecycleStatus,
     });
+  }
+
+  recordFindingIssueMapping({ repositoryId, findingId, issueNumber, issueUrl }) {
+    const key = `${repositoryId}:${findingId}`;
+    const existing = this.#findingIssues.get(key);
+    if (!existing) throw new Error(`finding issue publication does not exist: ${repositoryId}:${findingId}`);
+    existing.issueNumber = issueNumber;
+    existing.issueUrl = issueUrl;
   }
 
   recordFindingIssueFailure({ repositoryId, findingId, error }) {

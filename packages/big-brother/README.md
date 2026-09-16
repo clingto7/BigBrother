@@ -23,9 +23,10 @@ Current public seams:
 - `publishReviewResult`: validates and maps a review result to a non-blocking
   Commit Status, creating or updating it through the GitHub Adapter.
 - `publishReviewFindingIssues`: creates only the Review finding issues that
-  Repository Prime explicitly approves, and reuses durable stable-finding
-  mappings on repeated cycles. Failed or indeterminate publications remain
-  retryable; the next watch cycle reconciles the stable marker before creating.
+  Repository Prime explicitly approves, reuses durable stable-finding mappings,
+  updates later evidence, and closes or reopens only from explicit lifecycle
+  intents. Failed or indeterminate publications remain retryable; the next
+  watch cycle reconciles the stable marker before creating or updating.
 - `PrimeRuntimeSupervisor`: keeps one long-lived Prime runtime per repository
   and serializes review submissions until context-conflict handling exists.
 - `PrimeRpcRuntimeFactory`: starts the pinned Prime bundle through its public

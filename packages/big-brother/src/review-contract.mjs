@@ -51,8 +51,12 @@ export function validateReviewResult(result) {
   if (result.conclusion === "clean" && Array.isArray(result.context_decisions) && result.context_decisions.length > 0) {
     errors.push("clean review cannot contain context decisions");
   }
-  if (result.conclusion === "clean" && Array.isArray(result.finding_issue_intents) && result.finding_issue_intents.length > 0) {
-    errors.push("clean review cannot contain finding issue intents");
+  if (
+    result.conclusion === "clean" &&
+    Array.isArray(result.finding_issue_intents) &&
+    result.finding_issue_intents.some((intent) => findingIssueIntentAction(intent) !== "resolve")
+  ) {
+    errors.push("clean review cannot contain active finding issue intents");
   }
 
   if (Array.isArray(result.findings) && Array.isArray(result.evidence)) {
@@ -81,14 +85,18 @@ export function validateReviewResult(result) {
       const intendedFindings = new Set();
       for (const intent of result.finding_issue_intents) {
         const findingId = intent?.finding_id;
+        const action = findingIssueIntentAction(intent);
         if (typeof findingId !== "string" || findingId.length === 0) {
           errors.push("finding issue intent must have a non-empty finding_id");
-        } else if (!findingIds.has(findingId)) {
+        } else if (!(action === "resolve" || findingIds.has(findingId))) {
           errors.push(`finding issue intent cites unknown finding: ${findingId}`);
         } else if (intendedFindings.has(findingId)) {
           errors.push(`duplicate finding issue intent: ${findingId}`);
         } else {
           intendedFindings.add(findingId);
+        }
+        if (action !== "active" && action !== "resolve") {
+          errors.push(`finding issue intent ${findingId ?? "<unknown>"} has unsupported action: ${action}`);
         }
       }
     }
@@ -128,4 +136,8 @@ export function validateReviewResult(result) {
   }
 
   return { ok: errors.length === 0, errors };
+}
+
+export function findingIssueIntentAction(intent) {
+  return intent?.action ?? "active";
 }

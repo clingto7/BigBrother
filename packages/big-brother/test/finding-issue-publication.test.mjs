@@ -118,6 +118,7 @@ test("an Issues permission failure leaves Commit Status published and records a 
 		processed: 1,
 		failed: 0,
 		retriedFindingIssues: 0,
+		findingIssuePending: [],
 		findingIssueFailures: [
 			{
 				findingId: "auth-null-bypass",
@@ -225,6 +226,251 @@ test("clean, rejected, and non-actionable Prime results create no finding issue"
 	}
 });
 
+test("new evidence updates the mapped finding issue without creating a duplicate", async () => {
+	const store = preparedStore();
+	const calls = [];
+	const github = {
+		async createCommitStatus() {
+			return { id: 7 };
+		},
+		async createIssue(input) {
+			calls.push(["create", input]);
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42" };
+		},
+		async updateIssue(input) {
+			calls.push(["update", input]);
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: input.state };
+		},
+	};
+
+	await coordinatorReturning(actionableReview()).process(cycleInput(store, github));
+	store.enrollBranch({ repositoryId: "acme/app", branchName: "release", headSha: "commit-3" });
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-4", branchName: "main" });
+	const updatedReview = actionableReview({
+		commit_sha: "commit-4",
+		parent_sha: "commit-3",
+		findings: [{
+			id: "auth-null-bypass",
+			title: "Authorization bypass remains reachable",
+			message: "A null role still bypasses the authorization guard.",
+			evidence_refs: ["E2"],
+		}],
+		evidence: [{
+			id: "E2",
+			commit_sha: "commit-4",
+			path: "src/auth.mjs",
+			line: 24,
+			description: "The updated branch still returns before authorization is checked.",
+		}],
+	});
+
+	const result = await coordinatorReturning(updatedReview).process(cycleInput(store, github, updatedReview));
+
+	assert.deepEqual(calls.map(([operation]) => operation), ["create", "update"]);
+	assert.deepEqual(calls[1][1], {
+		repositoryId: "acme/app",
+		issueNumber: 42,
+		title: "Authorization bypass remains reachable",
+		body: [
+			"<!-- big-brother-finding-id: auth-null-bypass -->",
+			"**Stable finding ID:** `auth-null-bypass`",
+			"**Reviewed commit:** `commit-4`",
+			"",
+			"## Finding",
+			"A null role still bypasses the authorization guard.",
+			"",
+			"## Evidence",
+			"- `src/auth.mjs:24` — The updated branch still returns before authorization is checked.",
+			"",
+			"## Limitations",
+			"- Static review did not execute the authorization suite.",
+		].join("\n"),
+		labels: ["big-brother", "security"],
+		state: "open",
+	});
+	assert.equal(result.findingIssues[0].issueNumber, 42);
+	assert.equal(store.getFindingIssueState({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).lifecycleStatus, "active");
+	store.close();
+});
+
+test("an issue closes only for an explicit Prime resolution intent", async () => {
+	const store = preparedStore();
+	const updates = [];
+	const github = {
+		async createCommitStatus() {
+			return { id: 7 };
+		},
+		async createIssue() {
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: "open" };
+		},
+		async updateIssue(input) {
+			updates.push(input);
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: input.state };
+		},
+	};
+
+	await coordinatorReturning(actionableReview()).process(cycleInput(store, github));
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-4", branchName: "main" });
+	const cleanReview = actionableReview({
+		commit_sha: "commit-4",
+		parent_sha: "commit-3",
+		conclusion: "clean",
+		findings: [],
+		evidence: [],
+		finding_issue_intents: [{ finding_id: "auth-null-bypass", action: "resolve" }],
+	});
+
+	await coordinatorReturning(cleanReview).process(cycleInput(store, github, cleanReview));
+
+	assert.deepEqual(updates, [{
+		repositoryId: "acme/app",
+		issueNumber: 42,
+		title: "Null authorization bypass",
+		body: [
+			"<!-- big-brother-finding-id: auth-null-bypass -->",
+			"**Stable finding ID:** `auth-null-bypass`",
+			"**Reviewed commit:** `commit-3`",
+			"",
+			"## Finding",
+			"A null role bypasses the authorization guard.",
+			"",
+			"## Evidence",
+			"- `src/auth.mjs:18` — The null branch returns before authorization is checked.",
+			"",
+			"## Limitations",
+			"- Static review did not execute the authorization suite.",
+		].join("\n"),
+		labels: ["big-brother", "security"],
+		state: "closed",
+	}]);
+	assert.equal(store.getFindingIssueState({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).lifecycleStatus, "resolved");
+	store.close();
+});
+
+test("a later review without a resolution intent never closes an existing issue", async () => {
+	const store = preparedStore();
+	let updates = 0;
+	const github = {
+		async createCommitStatus() {
+			return { id: 7 };
+		},
+		async createIssue() {
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: "open" };
+		},
+		async updateIssue() {
+			updates += 1;
+		},
+	};
+
+	await coordinatorReturning(actionableReview()).process(cycleInput(store, github));
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-4", branchName: "main" });
+	const cleanReview = actionableReview({ commit_sha: "commit-4", parent_sha: "commit-3", conclusion: "clean", findings: [], evidence: [], finding_issue_intents: [] });
+	await coordinatorReturning(cleanReview).process(cycleInput(store, github, cleanReview));
+
+	assert.equal(updates, 0);
+	assert.equal(store.getFindingIssueState({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).lifecycleStatus, "active");
+	store.close();
+});
+
+test("a resolved finding reopens the same issue when Prime sees it active again", async () => {
+	const store = preparedStore();
+	const calls = [];
+	const github = {
+		async createCommitStatus() {
+			return { id: 7 };
+		},
+		async createIssue(input) {
+			calls.push(["create", input]);
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: "open" };
+		},
+		async updateIssue(input) {
+			calls.push(["update", input]);
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: input.state };
+		},
+	};
+
+	await coordinatorReturning(actionableReview()).process(cycleInput(store, github));
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-4", branchName: "main" });
+	const resolution = actionableReview({ commit_sha: "commit-4", parent_sha: "commit-3", conclusion: "clean", findings: [], evidence: [], finding_issue_intents: [{ finding_id: "auth-null-bypass", action: "resolve" }] });
+	await coordinatorReturning(resolution).process(cycleInput(store, github, resolution));
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-5", branchName: "main" });
+	const regression = actionableReview({ commit_sha: "commit-5", parent_sha: "commit-4" });
+	await coordinatorReturning(regression).process(cycleInput(store, github, regression));
+
+	assert.deepEqual(calls.map(([operation]) => operation), ["create", "update", "update"]);
+	assert.equal(calls[1][1].state, "closed");
+	assert.equal(calls[2][1].state, "open");
+	assert.equal(store.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).issueNumber, 42);
+	assert.equal(store.getFindingIssueState({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).lifecycleStatus, "active");
+	store.close();
+});
+
+test("restart retry reconciles a lifecycle request after GitHub applied it", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "big-brother-finding-lifecycle-retry-"));
+	const filePath = join(directory, "state.sqlite");
+	let remoteState = "open";
+	let updateCalls = 0;
+	let remoteIssue;
+	try {
+		const firstStore = preparedStore(filePath);
+		const github = {
+			async createCommitStatus() {
+				return { id: 7 };
+			},
+			async createIssue(input) {
+				remoteIssue = { ...input };
+				return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: "open" };
+			},
+			async updateIssue(input) {
+				updateCalls += 1;
+				remoteState = input.state;
+				throw new Error("network disconnected after GitHub accepted the update");
+			},
+		};
+		await coordinatorReturning(actionableReview()).process(cycleInput(firstStore, github));
+		firstStore.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-4", branchName: "main" });
+		const resolution = actionableReview({ commit_sha: "commit-4", parent_sha: "commit-3", conclusion: "clean", findings: [], evidence: [], finding_issue_intents: [{ finding_id: "auth-null-bypass", action: "resolve" }] });
+		await coordinatorReturning(resolution).process(cycleInput(firstStore, github, resolution));
+		assert.equal(firstStore.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).status, "failed");
+		firstStore.close();
+
+		const reopenedStore = new SqliteJobStore(filePath);
+		const retryGithub = {
+			async findIssueByFindingId() {
+				return {
+					number: 42,
+					html_url: "https://github.com/acme/app/issues/42",
+					state: remoteState,
+					title: remoteIssue.title,
+					body: remoteIssue.body,
+					labels: ["big-brother", "security"],
+				};
+			},
+			async updateIssue() {
+			throw new Error("retry should identify the already-applied close");
+			},
+		};
+		const cycle = await runRepositoryCycle({
+			profile: { repositoryId: "acme/app", trackedBranches: ["main"] },
+			store: reopenedStore,
+			publishGithub: retryGithub,
+			readGithub: {
+				async getBranchHead() {
+					return { sha: "commit-2" };
+				},
+			},
+		});
+
+		assert.equal(updateCalls, 1);
+		assert.equal(cycle.retriedFindingIssues, 1);
+		assert.equal(reopenedStore.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).status, "published");
+		assert.equal(reopenedStore.getFindingIssueState({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).lifecycleStatus, "resolved");
+		reopenedStore.close();
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
 function preparedStore(filePath = ":memory:") {
 	const store = new SqliteJobStore(filePath);
 	store.enrollBranch({ repositoryId: "acme/app", branchName: "main", headSha: "commit-2" });
@@ -281,7 +527,7 @@ function repositoryService({ store, github, submissions }) {
 	};
 }
 
-function cycleInput(store, github) {
+function cycleInput(store, github, reviewResult = actionableReview()) {
 	return {
 		repositoryProfile: {
 			repositoryId: "acme/app",
@@ -289,7 +535,7 @@ function cycleInput(store, github) {
 			stateNamespace: "/state/acme-app",
 			reviewFindingIssueLabels: ["big-brother", "security"],
 		},
-		job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: ["main"] },
+		job: { repositoryId: "acme/app", commitSha: reviewResult.commit_sha, observedBranches: ["main"] },
 		github,
 		store,
 	};

@@ -40,7 +40,10 @@ statement. A clean review must use an empty `context_decisions` array. Do not
 publish a Review finding issue unless Repository Prime explicitly includes a
 `finding_issue_intents` entry whose `finding_id` matches the stable ID of an
 evidence-backed finding. Rejected worker assertions and non-actionable findings
-must not appear in that array; a clean review uses an empty array. Do not
+must not appear in that array. An active intent omits `action` (or uses
+`action: "active"`); an explicit resolution of an existing mapped finding uses
+`{ "finding_id": "...", "action": "resolve" }`. A clean review may contain
+resolution intents, but never active intents. Do not
 substitute aliases such as `verdict`, `summary`, or
 `checks`; include empty arrays or objects when a section has no entries. The
 `conclusion` value must be exactly `clean`, `findings`, or `incomplete`. If the

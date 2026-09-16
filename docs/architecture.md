@@ -140,7 +140,10 @@ branch name. A job may be associated with several tracked branches.
 Review completion and finding-issue publication are separate state machines.
 An issue failure leaves the review completed and records the request payload
 and error for the next cycle. An indeterminate attempt is reconciled by its
-stable finding marker before another issue is created.
+stable finding marker before another issue is created. A mapped issue keeps its
+stable identity while later evidence updates its content; it is closed only for
+an explicit Prime `finding_issue_intents` entry with `action: "resolve"`, and
+an active intent reopens that same mapping when the finding returns.
 
 ### GitHub Adapter
 
@@ -149,7 +152,8 @@ responsibilities behind one narrow seam:
 
 - read repository refs, commit metadata, commit parents, and file/diff data;
 - publish and update the non-blocking Commit Status for a reviewed commit;
-- create Prime-approved Review finding issues in the watched Repository.
+- create, update, reopen, and explicitly resolve Prime-approved Review finding
+  issues in the watched Repository.
 
 It has no operation for push, branch mutation, file mutation, PR code changes,
 or merge control. The Adapter's read credential and publication credential are

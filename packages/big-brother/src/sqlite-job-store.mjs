@@ -61,11 +61,30 @@ export class SqliteJobStore {
         issue_url TEXT,
         publication_status TEXT NOT NULL,
         last_error TEXT,
+        desired_lifecycle_status TEXT NOT NULL DEFAULT 'active',
+        published_commit_sha TEXT,
+        published_issue_title TEXT,
+        published_issue_body TEXT,
+        published_labels_json TEXT,
+        published_lifecycle_status TEXT,
         PRIMARY KEY (repository_id, finding_id)
       );
     `);
     const columns = this.#db.prepare(`PRAGMA table_info(review_jobs)`).all().map((row) => row.name);
     if (!columns.includes("check_run_id")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN check_run_id INTEGER`);
+    const findingIssueColumns = this.#db.prepare(`PRAGMA table_info(review_finding_issues)`).all().map((row) => row.name);
+    for (const [name, definition] of [
+      ["desired_lifecycle_status", "TEXT NOT NULL DEFAULT 'active'"],
+      ["published_commit_sha", "TEXT"],
+      ["published_issue_title", "TEXT"],
+      ["published_issue_body", "TEXT"],
+      ["published_labels_json", "TEXT"],
+      ["published_lifecycle_status", "TEXT"],
+    ]) {
+      if (!findingIssueColumns.includes(name)) {
+        this.#db.exec(`ALTER TABLE review_finding_issues ADD COLUMN ${name} ${definition}`);
+      }
+    }
   }
 
   enrollBranch({ repositoryId, branchName, headSha }) {
@@ -188,34 +207,91 @@ export class SqliteJobStore {
       : undefined;
   }
 
-  stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels }) {
+  getFindingIssueState({ repositoryId, findingId }) {
+    const row = this.#db.prepare(`
+      SELECT source_commit_sha, issue_title, issue_body, labels_json,
+             issue_number, issue_url, publication_status, last_error,
+             desired_lifecycle_status, published_commit_sha,
+             published_issue_title, published_issue_body, published_labels_json,
+             published_lifecycle_status
+      FROM review_finding_issues
+      WHERE repository_id = ? AND finding_id = ?
+    `).get(repositoryId, findingId);
+    if (!row) return undefined;
+    return {
+      ...this.getFindingIssue({ repositoryId, findingId }),
+      commitSha: row.source_commit_sha,
+      title: row.issue_title,
+      body: row.issue_body,
+      labels: JSON.parse(row.labels_json),
+      lifecycleStatus: row.desired_lifecycle_status,
+      publishedCommitSha: row.published_commit_sha ?? undefined,
+      publishedTitle: row.published_issue_title ?? undefined,
+      publishedBody: row.published_issue_body ?? undefined,
+      publishedLabels: row.published_labels_json ? JSON.parse(row.published_labels_json) : undefined,
+      publishedLifecycleStatus: row.published_lifecycle_status ?? undefined,
+    };
+  }
+
+  stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels, lifecycleStatus = "active" }) {
     this.#db.prepare(`
       INSERT INTO review_finding_issues (
         repository_id, finding_id, source_commit_sha, issue_title, issue_body,
-        labels_json, publication_status
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        labels_json, publication_status, desired_lifecycle_status
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
       ON CONFLICT (repository_id, finding_id) DO UPDATE SET
         source_commit_sha = excluded.source_commit_sha,
         issue_title = excluded.issue_title,
         issue_body = excluded.issue_body,
         labels_json = excluded.labels_json,
+        desired_lifecycle_status = excluded.desired_lifecycle_status,
         publication_status = CASE
           WHEN review_finding_issues.issue_number IS NULL THEN 'pending'
+          WHEN review_finding_issues.published_commit_sha IS NULL THEN 'pending'
+          WHEN review_finding_issues.published_commit_sha != excluded.source_commit_sha
+            OR review_finding_issues.published_issue_title != excluded.issue_title
+            OR review_finding_issues.published_issue_body != excluded.issue_body
+            OR review_finding_issues.published_labels_json != excluded.labels_json
+            OR review_finding_issues.published_lifecycle_status != excluded.desired_lifecycle_status
+            THEN 'pending'
           ELSE review_finding_issues.publication_status
         END,
         last_error = CASE
-          WHEN review_finding_issues.issue_number IS NULL THEN NULL
+          WHEN review_finding_issues.issue_number IS NULL
+            OR review_finding_issues.published_commit_sha IS NULL
+            OR review_finding_issues.published_commit_sha != excluded.source_commit_sha
+            OR review_finding_issues.published_issue_title != excluded.issue_title
+            OR review_finding_issues.published_issue_body != excluded.issue_body
+            OR review_finding_issues.published_labels_json != excluded.labels_json
+            OR review_finding_issues.published_lifecycle_status != excluded.desired_lifecycle_status
+            THEN NULL
           ELSE review_finding_issues.last_error
         END
-    `).run(repositoryId, findingId, commitSha, title, body, JSON.stringify(labels));
+    `).run(repositoryId, findingId, commitSha, title, body, JSON.stringify(labels), lifecycleStatus);
+  }
+
+  stageFindingIssueResolution({ repositoryId, findingId, commitSha }) {
+    this.#db.prepare(`
+      UPDATE review_finding_issues
+      SET source_commit_sha = ?, desired_lifecycle_status = 'resolved',
+          publication_status = CASE
+            WHEN issue_number IS NULL THEN 'pending'
+            WHEN published_lifecycle_status = 'resolved' THEN publication_status
+            ELSE 'pending'
+          END,
+          last_error = NULL
+      WHERE repository_id = ? AND finding_id = ?
+    `).run(commitSha, repositoryId, findingId);
   }
 
   listRetryableFindingIssues(repositoryId) {
     return this.#db.prepare(`
       SELECT finding_id, source_commit_sha, issue_title, issue_body, labels_json,
-             publication_status, last_error
+             publication_status, last_error, desired_lifecycle_status,
+             published_commit_sha, published_issue_title, published_issue_body,
+             published_labels_json, published_lifecycle_status, issue_number, issue_url
       FROM review_finding_issues
-      WHERE repository_id = ? AND issue_number IS NULL
+      WHERE repository_id = ? AND publication_status IN ('pending', 'failed')
       ORDER BY rowid
     `).all(repositoryId).map((row) => ({
       repositoryId,
@@ -226,13 +302,34 @@ export class SqliteJobStore {
       labels: JSON.parse(row.labels_json),
       status: row.publication_status,
       lastError: row.last_error ?? undefined,
+      lifecycleStatus: row.desired_lifecycle_status,
+      issueNumber: row.issue_number ?? undefined,
+      issueUrl: row.issue_url ?? undefined,
+      publishedCommitSha: row.published_commit_sha ?? undefined,
+      publishedTitle: row.published_issue_title ?? undefined,
+      publishedBody: row.published_issue_body ?? undefined,
+      publishedLabels: row.published_labels_json ? JSON.parse(row.published_labels_json) : undefined,
+      publishedLifecycleStatus: row.published_lifecycle_status ?? undefined,
     }));
+  }
+
+  recordFindingIssueMapping({ repositoryId, findingId, issueNumber, issueUrl }) {
+    this.#db.prepare(`
+      UPDATE review_finding_issues
+      SET issue_number = ?, issue_url = ?
+      WHERE repository_id = ? AND finding_id = ?
+    `).run(issueNumber, issueUrl ?? null, repositoryId, findingId);
   }
 
   recordFindingIssue({ repositoryId, findingId, issueNumber, issueUrl }) {
     this.#db.prepare(`
       UPDATE review_finding_issues
-      SET issue_number = ?, issue_url = ?, publication_status = 'published', last_error = NULL
+      SET issue_number = ?, issue_url = ?, publication_status = 'published', last_error = NULL,
+          published_commit_sha = source_commit_sha,
+          published_issue_title = issue_title,
+          published_issue_body = issue_body,
+          published_labels_json = labels_json,
+          published_lifecycle_status = desired_lifecycle_status
       WHERE repository_id = ? AND finding_id = ?
     `).run(issueNumber, issueUrl ?? null, repositoryId, findingId);
   }

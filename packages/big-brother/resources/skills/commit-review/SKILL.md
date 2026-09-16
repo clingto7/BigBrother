@@ -26,6 +26,9 @@ Use this procedure for each host-supplied `ReviewInput`:
 8. Emit a `finding_issue_intents` entry only for an evidence-backed finding that
    Repository Prime explicitly classifies as actionable. Use the finding's stable
    `id` as `finding_id`; rejected and non-actionable assertions emit no intent.
+   To resolve an existing mapped finding, emit `{ "finding_id": "...", "action":
+   "resolve" }` explicitly; a later clean review without that intent must not
+   close the issue.
 
 ## Evidence discipline
 

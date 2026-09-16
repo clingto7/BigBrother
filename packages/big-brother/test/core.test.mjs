@@ -248,3 +248,23 @@ test("a finding issue intent must identify an evidence-backed finding in the sam
 	assert.equal(result.ok, false);
 	assert.match(result.errors.join("\n"), /finding issue intent cites unknown finding: unknown-finding/i);
 });
+
+test("an explicit resolution intent may accompany a clean review", () => {
+	const result = validateReviewResult({
+		repository_id: "acme/app",
+		commit_sha: "commit-4",
+		parent_sha: "commit-3",
+		observed_branches: ["main"],
+		conclusion: "clean",
+		message_check: { status: "pass" },
+		findings: [],
+		policy_checks: [],
+		evidence: [],
+		limitations: [],
+		candidate_facts: [],
+		context_decisions: [],
+		finding_issue_intents: [{ finding_id: "auth-null-bypass", action: "resolve" }],
+	});
+
+	assert.deepEqual(result, { ok: true, errors: [] });
+});

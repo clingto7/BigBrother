@@ -71,6 +71,18 @@ export class GitHubRestAdapter {
     });
   }
 
+  async updateIssue({ repositoryId, issueNumber, title, body, labels = [], state }) {
+    return this.#request(`/repos/${repositoryId}/issues/${issueNumber}`, {
+      method: "PATCH",
+      body: {
+        title,
+        body,
+        labels,
+        ...(state ? { state } : {}),
+      },
+    });
+  }
+
   async findIssueByFindingId({ repositoryId, findingId }) {
     const marker = `<!-- big-brother-finding-id: ${findingId} -->`;
     for (let page = 1; ; page += 1) {

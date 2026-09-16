@@ -212,7 +212,11 @@ big-brother review \
 
 Issue 发布失败不会把已完成的 review 改成失败；watch 输出会报告明确错误，
 SQLite 会保留待重试请求。下一轮 cycle 会先用 stable finding identity
-对 GitHub Issues 做 reconciliation，再决定是否创建，避免不确定请求产生重复 issue。
+对 GitHub Issues 做 reconciliation，再决定是否创建或更新，避免不确定请求产生重复 issue。
+同一 stable finding 的新证据会更新原 issue；后续 review 不会自动关闭它。
+只有 Prime 明确输出 `{"finding_id":"...","action":"resolve"}` 时才会关闭，
+之后再次输出 active finding intent 会重新打开同一个 issue。`runRepositoryCycle`
+的结果会分别暴露已完成 review、待处理 publication 和失败 publication。
 
 它不会 push，也不会改写仓库。首次使用时建议选择一个已经存在的 commit SHA，并检查 GitHub 上是否出现 `big-brother/review` status。
 

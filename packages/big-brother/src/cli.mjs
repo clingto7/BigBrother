@@ -302,7 +302,10 @@ export async function runRepositoryCycle(service) {
 	const findingIssueFailures = service.store.listRetryableFindingIssues(service.profile.repositoryId)
 		.filter((publication) => publication.status === "failed")
 		.map(({ findingId, lastError }) => ({ findingId, lastError }));
-	return { ...pollResult, processed, failed, retriedFindingIssues, findingIssueFailures };
+	const findingIssuePending = service.store.listRetryableFindingIssues(service.profile.repositoryId)
+		.filter((publication) => publication.status === "pending")
+		.map(({ findingId, lifecycleStatus }) => ({ findingId, lifecycleStatus }));
+	return { ...pollResult, processed, failed, retriedFindingIssues, findingIssuePending, findingIssueFailures };
 }
 
 async function processJob(service, job) {

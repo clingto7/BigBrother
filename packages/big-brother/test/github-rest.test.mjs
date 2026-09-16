@@ -180,6 +180,35 @@ test("GitHub REST adapter creates a labeled issue in the watched repository", as
   });
 });
 
+test("GitHub REST adapter updates issue content and lifecycle state", async () => {
+	const calls = [];
+	const github = new GitHubRestAdapter({
+		token: "status-and-issues-token",
+		fetchImpl: async (url, options) => {
+			calls.push({ url, options });
+			return response({ number: 42, state: "closed" });
+		},
+	});
+
+	await github.updateIssue({
+		repositoryId: "acme/app",
+		issueNumber: 42,
+		title: "Authorization bypass remains reachable",
+		body: "Updated evidence.",
+		labels: ["big-brother", "security"],
+		state: "closed",
+	});
+
+	assert.equal(calls[0].url, "https://api.github.com/repos/acme/app/issues/42");
+	assert.equal(calls[0].options.method, "PATCH");
+	assert.deepEqual(JSON.parse(calls[0].options.body), {
+		title: "Authorization bypass remains reachable",
+		body: "Updated evidence.",
+		labels: ["big-brother", "security"],
+		state: "closed",
+	});
+});
+
 test("GitHub REST adapter reconciles a finding issue by listing stable body markers", async () => {
   const urls = [];
   const github = new GitHubRestAdapter({
