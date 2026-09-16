@@ -15,6 +15,9 @@ test("supervisor keeps one long-lived Prime runtime per repository", async () =>
     async recover() {
       return { status: "ready" };
     },
+    async startFreshSession() {
+      return { sessionId: "fresh-session" };
+    },
     async stop() {},
   };
   const factory = {
@@ -34,6 +37,7 @@ test("supervisor keeps one long-lived Prime runtime per repository", async () =>
   assert.deepEqual(await supervisor.submitWorkerReview(first, { commitSha: "commit-3" }), { commitSha: "commit-3" });
   assert.deepEqual(await supervisor.reconcileReview(first, { reviewInput: { commitSha: "commit-3" } }), { commitSha: "commit-3" });
   assert.deepEqual(await supervisor.recover(first), { status: "ready" });
+  assert.deepEqual(await supervisor.startFreshSession(first), { sessionId: "fresh-session" });
   await supervisor.stop(first);
 });
 

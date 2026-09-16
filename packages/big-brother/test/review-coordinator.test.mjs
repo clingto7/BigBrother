@@ -90,6 +90,86 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 	assert.deepEqual(result.published, { id: 7 });
 });
 
+test("review coordinator retries reconciliation in a fresh Prime session after a stale fact decision", async () => {
+	const events = [];
+	const workerResult = {
+		repository_id: "acme/app",
+		commit_sha: "commit-3",
+		parent_sha: "commit-2",
+		observed_branches: ["main"],
+		conclusion: "findings",
+		message_check: { status: "pass" },
+		findings: [{ id: "finding-1", evidence_refs: ["E1"] }],
+		policy_checks: [],
+		evidence: [{ id: "E1", path: "src/app.ts", line: 1 }],
+		limitations: [],
+		candidate_facts: [],
+	};
+	const staleResult = {
+		...workerResult,
+		context_decisions: [{
+			id: "decision-1",
+			action: "correct",
+			fact_id: "stale-fact",
+			statement: "A stale fact.",
+			evidence_refs: ["E1"],
+			rationale: "Prime reconciled old session context.",
+		}],
+		finding_issue_intents: [{ finding_id: "finding-1" }],
+	};
+	const validResult = {
+		...workerResult,
+		context_decisions: [],
+		finding_issue_intents: [{ finding_id: "finding-1" }],
+	};
+	const reconciliations = [staleResult, validResult];
+	const runtimeHandle = { repositoryId: "acme/app" };
+	const coordinator = new ReviewCoordinator({
+		workspaceManager: {
+			async materialize() { return { directory: "/work/commit-3", commitSha: "commit-3" }; },
+		},
+		runtimeSupervisor: {
+			async start() { return runtimeHandle; },
+			async submitWorkerReview() { return workerResult; },
+			async reconcileReview(_handle, input) {
+				events.push(["reconcile", input.recoveryNotice]);
+				return reconciliations.shift();
+			},
+			async startFreshSession() { events.push(["new-session"]); },
+		},
+		evidenceProvider: async () => ({
+			parentSha: "commit-2",
+			commit: { message: "fix: protect operation errors" },
+			changedPaths: ["src/app.ts"],
+			diff: "diff",
+			policySnapshot: {},
+		}),
+		publisher: async () => {
+			events.push(["publish"]);
+			return { id: 7 };
+		},
+		findingIssuePublisher: async () => [],
+	});
+	const store = {
+		getContextLedger: () => [],
+		validateContextDecisions({ reviewResult }) {
+			if (reviewResult.context_decisions.length > 0) throw new Error("cannot correct unknown fact: stale-fact");
+		},
+		recordReviewResult() {},
+	};
+
+	const result = await coordinator.process({
+		repositoryProfile: { repositoryId: "acme/app", cloneUrl: "https://github.com/acme/app.git", stateNamespace: "/state/acme-app" },
+		job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: ["main"] },
+		github: {},
+		store,
+	});
+
+	assert.deepEqual(events.map(([operation]) => operation), ["reconcile", "new-session", "reconcile", "publish"]);
+	assert.match(events[2][1], /unknown fact/);
+	assert.deepEqual(result.reviewResult, validResult);
+});
+
 test("review coordinator refuses a job from another repository", async () => {
 	const coordinator = new ReviewCoordinator({
 		workspaceManager: { async materialize() {} },

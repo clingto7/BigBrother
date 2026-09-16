@@ -48,9 +48,11 @@ test("Prime launch options isolate session state while inheriting shared Big Bro
 
 test("Prime RPC factory loads the reviewer profile and returns a runtime", async () => {
 	const starts = [];
+	const commands = [];
 	const client = {
 		async start() { starts.push("start"); },
 		async send(command) {
+			commands.push(command.type);
 			if (command.type === "get_state") return { isStreaming: false, sessionId: "session-1", messageCount: 2 };
 			if (command.type === "get_last_assistant_text") return { text: '{"conclusion":"clean"}' };
 			return undefined;
@@ -76,6 +78,8 @@ test("Prime RPC factory loads the reviewer profile and returns a runtime", async
 	assert.deepEqual(await runtime.recover(), { status: "ready", sessionId: "session-1", messageCount: 2 });
 	assert.deepEqual(await runtime.submitWorkerReview({ commit_sha: "abc123" }), { conclusion: "clean" });
 	assert.deepEqual(await runtime.reconcileReview({ reviewInput: { commit_sha: "abc123" }, workerResult: {}, canonicalContext: [] }), { conclusion: "clean" });
+	await runtime.startFreshSession();
+	assert.ok(commands.includes("new_session"));
 	await runtime.stop();
 	assert.deepEqual(starts.slice(-2), ["start", "stop"]);
 });
@@ -104,5 +108,6 @@ test("worker and Prime reconciliation prompts keep their authority boundaries ex
 	});
 	assert.match(primePrompt, /long-lived Repository Prime/);
 	assert.match(primePrompt, /Only this pass may emit context_decisions or finding_issue_intents/);
+	assert.match(primePrompt, /fact_id.*active fact.*canonical context/i);
 	assert.match(primePrompt, /<worker-result>/);
 });

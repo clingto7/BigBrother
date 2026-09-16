@@ -63,6 +63,36 @@ test("a completed repository cycle publishes and durably maps a Prime-approved f
 	store.close();
 });
 
+test("first publication reconciles an existing stable marker before creating an issue", async () => {
+	const store = preparedStore();
+	const calls = [];
+	const github = {
+		async createCommitStatus() {
+			calls.push("status");
+			return { id: 7 };
+		},
+		async findIssueByFindingId(input) {
+			calls.push(["find", input]);
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42" };
+		},
+		async createIssue() {
+			calls.push("create");
+			throw new Error("duplicate issue creation");
+		},
+		async updateIssue(input) {
+			calls.push(["update", input]);
+			return { number: 42, html_url: "https://github.com/acme/app/issues/42", state: input.state };
+		},
+	};
+
+	const result = await coordinatorReturning(actionableReview()).process(cycleInput(store, github));
+
+	assert.deepEqual(calls.map((call) => Array.isArray(call) ? call[0] : call), ["status", "find", "update"]);
+	assert.equal(result.findingIssues[0].issueNumber, 42);
+	assert.equal(store.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).status, "published");
+	store.close();
+});
+
 test("repeating a repository cycle after restart reuses the durable finding issue mapping", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "big-brother-finding-issue-"));
 	const filePath = join(directory, "state.sqlite");

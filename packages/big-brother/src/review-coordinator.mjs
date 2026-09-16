@@ -76,24 +76,25 @@ export class ReviewCoordinator {
 			commitSha: job.commitSha,
 			reviewResult: workerResult,
 		});
-		const reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
+		let reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
 			reviewInput,
 			workerResult,
 			canonicalContext,
 		});
-		const validation = validateReviewResult(reviewResult);
-		if (!validation.ok) throw new Error(`invalid review result: ${validation.errors.join("; ")}`);
-		assertReviewResultIdentity({
-			repositoryId: job.repositoryId,
-			commitSha: job.commitSha,
-			reviewResult,
-		});
-		if (reviewResult.context_decisions.length > 0) {
-			store.validateContextDecisions({
-				repositoryId: job.repositoryId,
-				commitSha: job.commitSha,
-				reviewResult,
+		validateReconciledReviewResult({ reviewResult, repositoryId: job.repositoryId, commitSha: job.commitSha });
+		try {
+			validateContextDecisions(store, job, reviewResult);
+		} catch (error) {
+			if (!isUnknownContextFactError(error) || typeof this.#runtimeSupervisor.startFreshSession !== "function") throw error;
+			await this.#runtimeSupervisor.startFreshSession(handle);
+			reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
+				reviewInput,
+				workerResult,
+				canonicalContext,
+				recoveryNotice: error.message,
 			});
+			validateReconciledReviewResult({ reviewResult, repositoryId: job.repositoryId, commitSha: job.commitSha });
+			validateContextDecisions(store, job, reviewResult);
 		}
 		const published = await this.#publisher({
 			github,
@@ -121,4 +122,23 @@ export class ReviewCoordinator {
 
 		return { reviewInput, workerResult, reviewResult, published, findingIssues, workspace };
 	}
+}
+
+function validateReconciledReviewResult({ reviewResult, repositoryId, commitSha }) {
+	const validation = validateReviewResult(reviewResult);
+	if (!validation.ok) throw new Error(`invalid review result: ${validation.errors.join("; ")}`);
+	assertReviewResultIdentity({ repositoryId, commitSha, reviewResult });
+}
+
+function validateContextDecisions(store, job, reviewResult) {
+	if (reviewResult.context_decisions.length === 0) return;
+	store.validateContextDecisions({
+		repositoryId: job.repositoryId,
+		commitSha: job.commitSha,
+		reviewResult,
+	});
+}
+
+function isUnknownContextFactError(error) {
+	return error instanceof Error && /^cannot (correct|supersede|retract) unknown fact:/.test(error.message);
 }

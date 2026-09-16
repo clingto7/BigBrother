@@ -68,9 +68,11 @@ async function attemptPublication({ github, store, publication, reconcile }) {
 				throw new Error("GitHub adapter cannot reconcile an indeterminate finding issue publication");
 			}
 			issue = await github.findIssueByFindingId({ repositoryId, findingId });
-			if (!issue && publication.issueNumber != null) {
-				throw new Error(`mapped GitHub Review finding issue was not found: ${repositoryId}:${findingId}`);
-			}
+		} else if (publication.issueNumber == null && typeof github.findIssueByFindingId === "function") {
+			issue = await github.findIssueByFindingId({ repositoryId, findingId });
+		}
+		if (reconcile && !issue && publication.issueNumber != null) {
+			throw new Error(`mapped GitHub Review finding issue was not found: ${repositoryId}:${findingId}`);
 		}
 		if (!issue && publication.issueNumber == null) {
 			issue = await github.createIssue({ repositoryId, title, body, labels });

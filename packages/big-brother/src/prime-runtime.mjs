@@ -67,6 +67,16 @@ export class PrimeRuntimeSupervisor {
     return entry.runtime.recover();
   }
 
+  async startFreshSession(handle) {
+    const entry = this.#entryFor(handle);
+    await entry.startPromise;
+    await entry.queue;
+    if (typeof entry.runtime.startFreshSession !== "function") {
+      throw new Error("Prime runtime does not support starting a fresh session");
+    }
+    return entry.runtime.startFreshSession();
+  }
+
   async stop(handle) {
     const entry = this.#entryFor(handle);
     await entry.startPromise;
