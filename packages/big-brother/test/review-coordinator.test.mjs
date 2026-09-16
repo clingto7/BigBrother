@@ -132,7 +132,7 @@ test("review coordinator retries reconciliation in a fresh Prime session after a
 			async start() { return runtimeHandle; },
 			async submitWorkerReview() { return workerResult; },
 			async reconcileReview(_handle, input) {
-				events.push(["reconcile", input.recoveryNotice]);
+				events.push(["reconcile", input.recoveryNotice, input.mappedFindingIssues]);
 				return reconciliations.shift();
 			},
 			async startFreshSession() { events.push(["new-session"]); },
@@ -152,6 +152,15 @@ test("review coordinator retries reconciliation in a fresh Prime session after a
 	});
 	const store = {
 		getContextLedger: () => [],
+		listFindingIssueStates: () => [{
+			findingId: "finding-1",
+			issueNumber: 42,
+			issueUrl: "https://github.com/acme/app/issues/42",
+			lifecycleStatus: "active",
+			title: "Existing finding",
+			body: "Existing evidence",
+			labels: ["big-brother"],
+		}],
 		validateContextDecisions({ reviewResult }) {
 			if (reviewResult.context_decisions.length > 0) throw new Error("cannot correct unknown fact: stale-fact");
 		},
@@ -167,6 +176,7 @@ test("review coordinator retries reconciliation in a fresh Prime session after a
 
 	assert.deepEqual(events.map(([operation]) => operation), ["reconcile", "new-session", "reconcile", "publish"]);
 	assert.match(events[2][1], /unknown fact/);
+	assert.equal(events[0][2][0].findingId, "finding-1");
 	assert.deepEqual(result.reviewResult, validResult);
 });
 

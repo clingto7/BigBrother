@@ -250,6 +250,15 @@ export class SqliteJobStore {
     };
   }
 
+  listFindingIssueStates(repositoryId) {
+    return this.#db.prepare(`
+      SELECT finding_id
+      FROM review_finding_issues
+      WHERE repository_id = ?
+      ORDER BY rowid
+    `).all(repositoryId).map(({ finding_id }) => this.getFindingIssueState({ repositoryId, findingId: finding_id }));
+  }
+
   stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels, lifecycleStatus = "active" }) {
     this.#db.prepare(`
       INSERT INTO review_finding_issues (

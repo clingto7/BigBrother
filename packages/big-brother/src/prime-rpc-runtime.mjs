@@ -158,7 +158,7 @@ export function buildWorkerReviewPrompt(reviewInput) {
 	].join("\n");
 }
 
-export function buildPrimeReconciliationPrompt({ reviewInput, workerResult, canonicalContext, recoveryNotice }) {
+export function buildPrimeReconciliationPrompt({ reviewInput, workerResult, canonicalContext, mappedFindingIssues, recoveryNotice }) {
 	return [
 		"Act as the long-lived Repository Prime and reconcile one bounded worker result into the final ReviewResult.",
 		"Return only a JSON object conforming to the Big Brother ReviewResult contract.",
@@ -166,6 +166,7 @@ export function buildPrimeReconciliationPrompt({ reviewInput, workerResult, cano
 		"Only this pass may emit context_decisions or finding_issue_intents. Candidate facts remain proposals unless explicitly admitted, corrected, superseded, or retracted in context_decisions.",
 		"Every context_decisions fact_id for correct, supersede, or retract must identify an active fact from canonical context. If no matching active fact exists, do not emit that decision.",
 		"Only explicitly actionable, evidence-backed findings may receive an active finding_issue_intents entry. Resolve an existing mapped finding only with { finding_id, action: \"resolve\" }.",
+		"Existing mapped finding issues are supplied below. Emit a resolve intent only when current evidence proves that mapped finding resolved; a clean review alone is not enough.",
 		"Use exactly these top-level keys: repository_id, commit_sha, parent_sha, observed_branches, conclusion, message_check, findings, policy_checks, evidence, limitations, candidate_facts, context_decisions, finding_issue_intents.",
 		"Do not use aliases such as verdict, summary, or checks; include empty arrays or objects when a section has no entries.",
 		"The conclusion must be exactly one of clean, findings, or incomplete.",
@@ -181,6 +182,9 @@ export function buildPrimeReconciliationPrompt({ reviewInput, workerResult, cano
 		"<canonical-context>",
 		JSON.stringify(canonicalContext, null, 2),
 		"</canonical-context>",
+		"<mapped-finding-issues>",
+		JSON.stringify(mappedFindingIssues ?? [], null, 2),
+		"</mapped-finding-issues>",
 	].join("\n");
 }
 

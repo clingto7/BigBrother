@@ -137,6 +137,12 @@ export class InMemoryJobStore {
     });
   }
 
+  listFindingIssueStates(repositoryId) {
+    return [...this.#findingIssues.values()]
+      .filter((issue) => issue.repositoryId === repositoryId)
+      .map((issue) => this.getFindingIssueState({ repositoryId, findingId: issue.findingId }));
+  }
+
   stageFindingIssue({ repositoryId, findingId, commitSha, title, body, labels, lifecycleStatus = "active" }) {
     const key = `${repositoryId}:${findingId}`;
     const existing = this.#findingIssues.get(key);

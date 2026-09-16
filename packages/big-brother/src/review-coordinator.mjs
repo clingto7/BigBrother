@@ -55,6 +55,16 @@ export class ReviewCoordinator {
 		const canonicalContext = (store.getContextLedger?.(job.repositoryId) ?? []).filter(
 			(fact) => fact.status === "active",
 		);
+		const mappedFindingIssues = (store.listFindingIssueStates?.(job.repositoryId) ?? [])
+			.filter((issue) => issue.issueNumber != null && issue.publishedLifecycleStatus !== "resolved")
+			.map(({ findingId, issueNumber, issueUrl, title, body, labels }) => ({
+				findingId,
+				issueNumber,
+				issueUrl,
+				title,
+				body,
+				labels,
+			}));
 		const reviewInput = this.#inputBuilder({
 			...evidence,
 			repositoryId: job.repositoryId,
@@ -80,17 +90,19 @@ export class ReviewCoordinator {
 			reviewInput,
 			workerResult,
 			canonicalContext,
+			mappedFindingIssues,
 		});
-		validateReconciledReviewResult({ reviewResult, repositoryId: job.repositoryId, commitSha: job.commitSha });
 		try {
+			validateReconciledReviewResult({ reviewResult, repositoryId: job.repositoryId, commitSha: job.commitSha });
 			validateContextDecisions(store, job, reviewResult);
 		} catch (error) {
-			if (!isUnknownContextFactError(error) || typeof this.#runtimeSupervisor.startFreshSession !== "function") throw error;
+			if (!isRecoverableContextReconciliationError(error) || typeof this.#runtimeSupervisor.startFreshSession !== "function") throw error;
 			await this.#runtimeSupervisor.startFreshSession(handle);
 			reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
 				reviewInput,
 				workerResult,
 				canonicalContext,
+				mappedFindingIssues,
 				recoveryNotice: error.message,
 			});
 			validateReconciledReviewResult({ reviewResult, repositoryId: job.repositoryId, commitSha: job.commitSha });
@@ -139,6 +151,8 @@ function validateContextDecisions(store, job, reviewResult) {
 	});
 }
 
-function isUnknownContextFactError(error) {
-	return error instanceof Error && /^cannot (correct|supersede|retract) unknown fact:/.test(error.message);
+function isRecoverableContextReconciliationError(error) {
+	if (!(error instanceof Error)) return false;
+	return /^cannot (correct|supersede|retract) unknown fact:/.test(error.message) ||
+		error.message.includes("context decision");
 }

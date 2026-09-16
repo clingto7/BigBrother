@@ -105,9 +105,11 @@ test("worker and Prime reconciliation prompts keep their authority boundaries ex
 		reviewInput: { commit_sha: "abc123" },
 		workerResult: { candidate_facts: [] },
 		canonicalContext: [],
+		mappedFindingIssues: [],
 	});
 	assert.match(primePrompt, /long-lived Repository Prime/);
 	assert.match(primePrompt, /Only this pass may emit context_decisions or finding_issue_intents/);
 	assert.match(primePrompt, /fact_id.*active fact.*canonical context/i);
+	assert.match(primePrompt, /mapped finding issues/);
 	assert.match(primePrompt, /<worker-result>/);
 });
