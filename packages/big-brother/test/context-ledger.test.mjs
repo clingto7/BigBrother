@@ -161,6 +161,28 @@ test("an invalid Prime decision fails the repository cycle without changing dura
 	store.close();
 });
 
+test("a publication failure leaves the Context Ledger unchanged", async () => {
+	const store = new SqliteJobStore(":memory:");
+	store.enrollBranch({ repositoryId: "acme/app", branchName: "main", headSha: "commit-2" });
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-3", branchName: "main" });
+	const result = review({
+		evidence: [{ id: "E1", commit_sha: "commit-3", path: "README.md" }],
+		context_decisions: [
+			decision({ id: "unpublished-admit", action: "admit", factId: "fact-unpublished", statement: "Not completed." }),
+		],
+	});
+	const failingPublisher = async () => {
+		throw new Error("publication failed");
+	};
+
+	await assert.rejects(
+		coordinatorReturning(result, [], failingPublisher).process(cycleInput(store)),
+		/publication failed/,
+	);
+	assert.deepEqual(store.getContextLedger("acme/app"), []);
+	store.close();
+});
+
 test("Ledger reconciliation rejects impossible transitions atomically", async () => {
 	const store = new SqliteJobStore(":memory:");
 	store.enrollBranch({ repositoryId: "acme/app", branchName: "main", headSha: "commit-2" });
@@ -191,7 +213,7 @@ test("worker-only candidate facts and clean reviews leave the Context Ledger unc
 		}),
 	).process(cycleInput(store, "commit-2"));
 	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-3", branchName: "main" });
-	await coordinatorReturning(review()).process(cycleInput(store, "commit-3"));
+	await coordinatorReturning(review({ conclusion: "clean" })).process(cycleInput(store, "commit-3"));
 
 	assert.deepEqual(store.getContextLedger("acme/app"), []);
 	store.close();
@@ -248,7 +270,7 @@ function openStore(filePath) {
 	return store;
 }
 
-function coordinatorReturning(reviewResult, submittedInputs = []) {
+function coordinatorReturning(reviewResult, submittedInputs = [], publisher = async () => ({ id: 7 })) {
 	return new ReviewCoordinator({
 		workspaceManager: {
 			async materialize({ commitSha }) {
@@ -271,7 +293,7 @@ function coordinatorReturning(reviewResult, submittedInputs = []) {
 			diff: "diff",
 			policySnapshot: {},
 		}),
-		publisher: async () => ({ id: 7 }),
+		publisher,
 	});
 }
 
@@ -305,7 +327,7 @@ function review(overrides = {}) {
 		commit_sha: "commit-3",
 		parent_sha: "commit-2",
 		observed_branches: ["main"],
-		conclusion: "clean",
+		conclusion: "findings",
 		message_check: { status: "pass" },
 		findings: [],
 		policy_checks: [],

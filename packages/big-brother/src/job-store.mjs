@@ -1,3 +1,9 @@
+import {
+  buildContextDecisionRecords,
+  reconcileContextDecisionRecords,
+  reduceContextLedger,
+} from "./context-ledger.mjs";
+
 function copy(value) {
   return structuredClone(value);
 }
@@ -86,73 +92,16 @@ export class InMemoryJobStore {
   }
 
   recordContextDecisions({ repositoryId, commitSha, reviewResult }) {
-    if (reviewResult.repository_id !== repositoryId || reviewResult.commit_sha !== commitSha) {
-      throw new Error("context decision source does not match the repository cycle");
+    const existing = [...this.#contextDecisions.values()].filter((record) => record.repositoryId === repositoryId);
+    const proposed = buildContextDecisionRecords({ repositoryId, commitSha, reviewResult });
+    for (const record of reconcileContextDecisionRecords(existing, proposed)) {
+      this.#contextDecisions.set(`${repositoryId}:${record.decisionId}`, record);
     }
-    const evidenceById = new Map(reviewResult.evidence.map((item) => [item?.id, item]));
-    const facts = new Map(this.getContextLedger(repositoryId).map((fact) => [fact.factId, fact]));
-    const staged = [];
-    for (const decision of reviewResult.context_decisions) {
-      const key = `${repositoryId}:${decision.id}`;
-      const record = {
-        repositoryId,
-        decisionId: decision.id,
-        factId: decision.fact_id,
-        action: decision.action,
-        statement: decision.statement,
-        rationale: decision.rationale,
-        source: { repositoryId, commitSha, reviewId: `${repositoryId}:${commitSha}` },
-        evidence: decision.evidence_refs.map((id) => evidenceById.get(id)),
-      };
-      const existing = this.#contextDecisions.get(key) ?? staged.find(([stagedKey]) => stagedKey === key)?.[1];
-      if (existing) {
-        if (JSON.stringify(existing) !== JSON.stringify(record)) {
-          throw new Error(`context decision id was reused with different content: ${decision.id}`);
-        }
-        continue;
-      }
-
-      const fact = facts.get(decision.fact_id);
-      if (decision.action === "admit") {
-        if (fact) throw new Error(`cannot admit existing fact: ${decision.fact_id}`);
-      } else if (!fact) {
-        throw new Error(`cannot ${decision.action} unknown fact: ${decision.fact_id}`);
-      } else if (fact.status !== "active") {
-        throw new Error(`cannot ${decision.action} ${fact.status} fact: ${decision.fact_id}`);
-      }
-      staged.push([key, record]);
-      facts.set(decision.fact_id, {
-        factId: decision.fact_id,
-        statement: decision.statement ?? fact?.statement,
-        status: decision.action === "supersede" ? "superseded" : decision.action === "retract" ? "retracted" : "active",
-      });
-    }
-    for (const [key, record] of staged) this.#contextDecisions.set(key, record);
   }
 
   getContextLedger(repositoryId) {
-    const facts = new Map();
-    for (const record of this.#contextDecisions.values()) {
-      if (record.repositoryId !== repositoryId) continue;
-      const fact = facts.get(record.factId) ?? {
-        factId: record.factId,
-        statement: undefined,
-        status: "active",
-        history: [],
-      };
-      fact.statement = record.statement ?? fact.statement;
-      fact.status = record.action === "supersede" ? "superseded" : record.action === "retract" ? "retracted" : "active";
-      fact.history.push({
-        decisionId: record.decisionId,
-        action: record.action,
-        statement: record.statement,
-        rationale: record.rationale,
-        source: copy(record.source),
-        evidence: copy(record.evidence),
-      });
-      facts.set(record.factId, fact);
-    }
-    return copy([...facts.values()]);
+    const records = [...this.#contextDecisions.values()].filter((record) => record.repositoryId === repositoryId);
+    return reduceContextLedger(records);
   }
 }
 

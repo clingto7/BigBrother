@@ -9,10 +9,11 @@ Current public seams:
   settings such as repositories, tracked branches, polling, state namespaces,
   and environment-variable credential references. Prime runtime settings are
   passed through separately.
-- `InMemoryJobStore`: test adapter for branch enrollment and repository+SHA
-  review deduplication.
+- `InMemoryJobStore`: test adapter for branch enrollment, repository+SHA review
+  deduplication, and repository-scoped Context Ledger behavior.
 - `SqliteJobStore`: persistent service-state Adapter using Node's built-in
-  `node:sqlite`; it restores cursors and review jobs after restart.
+  `node:sqlite`; it restores cursors, review jobs, and provenance-carrying
+  Context Ledger decisions after restart.
 - `pollRepository`: control-plane poller that consumes a GitHub Adapter,
   enqueues every commit after the branch cursor, and advances the cursor only
   after the range reaches the observed head.
@@ -29,7 +30,8 @@ Current public seams:
 - `buildReviewInput`: creates the host-owned, immutable commit evidence packet
   passed to Prime; it never executes or interprets repository content.
 - `ReviewCoordinator`: runs one admitted job through workspace materialization,
-  evidence assembly, Prime submission, and Commit Status publication.
+  recovered-context evidence assembly, Prime submission, Commit Status
+  publication, and durable reconciliation of Prime-approved context decisions.
 - `GitReviewEvidenceAdapter`: reads the fixed workspace commit, parent diff,
   message, changed paths, and policy documents with read-only Git commands.
 - `createReviewerProfile`: defines the initial static, read-only system

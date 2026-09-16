@@ -186,3 +186,40 @@ test("a context decision is accepted only when it cites returned evidence", () =
   assert.equal(result.ok, false);
   assert.match(result.errors.join("\n"), /context decision decision-1 cites unknown evidence/i);
 });
+
+test("a context decision requires a rationale and cannot accompany a clean review", () => {
+  const base = {
+    repository_id: "acme/app",
+    commit_sha: "commit-2",
+    parent_sha: "commit-1",
+    observed_branches: ["main"],
+    conclusion: "findings",
+    message_check: { status: "pass" },
+    findings: [],
+    policy_checks: [],
+    evidence: [{ id: "E1", path: "README.md" }],
+    limitations: [],
+    candidate_facts: [],
+    context_decisions: [
+      {
+        id: "decision-1",
+        action: "admit",
+        fact_id: "fact-1",
+        statement: "The repository uses ESM.",
+        evidence_refs: ["E1"],
+      },
+    ],
+  };
+
+  const missingRationale = validateReviewResult(base);
+  assert.equal(missingRationale.ok, false);
+  assert.match(missingRationale.errors.join("\n"), /context decision decision-1 must have a non-empty rationale/i);
+
+  const cleanAdmission = validateReviewResult({
+    ...base,
+    conclusion: "clean",
+    context_decisions: [{ ...base.context_decisions[0], rationale: "Prime admitted cited evidence." }],
+  });
+  assert.equal(cleanAdmission.ok, false);
+  assert.match(cleanAdmission.errors.join("\n"), /clean review cannot contain context decisions/i);
+});

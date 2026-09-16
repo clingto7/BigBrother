@@ -63,6 +63,11 @@ export class ReviewCoordinator {
 		const reviewResult = await this.#runtimeSupervisor.submitReview(handle, reviewInput);
 		const validation = validateReviewResult(reviewResult);
 		if (!validation.ok) throw new Error(`invalid review result: ${validation.errors.join("; ")}`);
+		const published = await this.#publisher({
+			github,
+			store,
+			reviewResult,
+		});
 		if (reviewResult.context_decisions?.length > 0) {
 			store.recordContextDecisions({
 				repositoryId: job.repositoryId,
@@ -70,11 +75,6 @@ export class ReviewCoordinator {
 				reviewResult,
 			});
 		}
-		const published = await this.#publisher({
-			github,
-			store,
-			reviewResult,
-		});
 
 		return { reviewInput, reviewResult, published, workspace };
 	}

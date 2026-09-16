@@ -2,6 +2,12 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import {
+  buildContextDecisionRecords,
+  reconcileContextDecisionRecords,
+  reduceContextLedger,
+} from "./context-ledger.mjs";
+
 export class SqliteJobStore {
   #db;
 
@@ -152,70 +158,29 @@ export class SqliteJobStore {
   }
 
   recordContextDecisions({ repositoryId, commitSha, reviewResult }) {
-    if (reviewResult.repository_id !== repositoryId || reviewResult.commit_sha !== commitSha) {
-      throw new Error("context decision source does not match the repository cycle");
-    }
-    const evidenceById = new Map(reviewResult.evidence.map((item) => [item?.id, item]));
     const insert = this.#db.prepare(`
       INSERT INTO context_ledger_decisions (
         repository_id, decision_id, fact_id, action, statement, rationale,
         source_commit_sha, source_review_id, evidence_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const findDecision = this.#db.prepare(`
-      SELECT fact_id, action, statement, rationale, source_commit_sha,
-             source_review_id, evidence_json
-      FROM context_ledger_decisions
-      WHERE repository_id = ? AND decision_id = ?
-    `);
-    const facts = new Map(this.getContextLedger(repositoryId).map((fact) => [fact.factId, fact]));
-    const reviewId = `${repositoryId}:${commitSha}`;
+    const proposed = buildContextDecisionRecords({ repositoryId, commitSha, reviewResult });
 
     this.#db.exec("BEGIN IMMEDIATE");
     try {
-      for (const decision of reviewResult.context_decisions) {
-        const evidenceJson = JSON.stringify(decision.evidence_refs.map((id) => evidenceById.get(id)));
-        const values = [
-          decision.fact_id,
-          decision.action,
-          decision.statement ?? null,
-          decision.rationale ?? null,
-          commitSha,
-          reviewId,
-          evidenceJson,
-        ];
-        const existing = findDecision.get(repositoryId, decision.id);
-        if (existing) {
-          const existingValues = [
-            existing.fact_id,
-            existing.action,
-            existing.statement,
-            existing.rationale,
-            existing.source_commit_sha,
-            existing.source_review_id,
-            existing.evidence_json,
-          ];
-          if (!values.every((value, index) => value === existingValues[index])) {
-            throw new Error(`context decision id was reused with different content: ${decision.id}`);
-          }
-          continue;
-        }
-
-        const fact = facts.get(decision.fact_id);
-        if (decision.action === "admit") {
-          if (fact) throw new Error(`cannot admit existing fact: ${decision.fact_id}`);
-        } else if (!fact) {
-          throw new Error(`cannot ${decision.action} unknown fact: ${decision.fact_id}`);
-        } else if (fact.status !== "active") {
-          throw new Error(`cannot ${decision.action} ${fact.status} fact: ${decision.fact_id}`);
-        }
-
-        insert.run(repositoryId, decision.id, ...values);
-        facts.set(decision.fact_id, {
-          factId: decision.fact_id,
-          statement: decision.statement ?? fact?.statement,
-          status: decision.action === "supersede" ? "superseded" : decision.action === "retract" ? "retracted" : "active",
-        });
+      const existing = this.#listContextDecisionRecords(repositoryId);
+      for (const record of reconcileContextDecisionRecords(existing, proposed)) {
+        insert.run(
+          record.repositoryId,
+          record.decisionId,
+          record.factId,
+          record.action,
+          record.statement ?? null,
+          record.rationale ?? null,
+          record.source.commitSha,
+          record.source.reviewId,
+          JSON.stringify(record.evidence),
+        );
       }
       this.#db.exec("COMMIT");
     } catch (error) {
@@ -225,6 +190,10 @@ export class SqliteJobStore {
   }
 
   getContextLedger(repositoryId) {
+    return reduceContextLedger(this.#listContextDecisionRecords(repositoryId));
+  }
+
+  #listContextDecisionRecords(repositoryId) {
     const rows = this.#db.prepare(`
       SELECT decision_id, fact_id, action, statement, rationale,
              source_commit_sha, source_review_id, evidence_json
@@ -232,31 +201,20 @@ export class SqliteJobStore {
       WHERE repository_id = ?
       ORDER BY rowid
     `).all(repositoryId);
-    const facts = new Map();
-    for (const row of rows) {
-      const fact = facts.get(row.fact_id) ?? {
-        factId: row.fact_id,
-        statement: undefined,
-        status: "active",
-        history: [],
-      };
-      fact.statement = row.statement ?? fact.statement;
-      fact.status = row.action === "supersede" ? "superseded" : row.action === "retract" ? "retracted" : "active";
-      fact.history.push({
-        decisionId: row.decision_id,
-        action: row.action,
-        statement: row.statement ?? undefined,
-        rationale: row.rationale ?? undefined,
-        source: {
-          repositoryId,
-          commitSha: row.source_commit_sha,
-          reviewId: row.source_review_id,
-        },
-        evidence: JSON.parse(row.evidence_json),
-      });
-      facts.set(row.fact_id, fact);
-    }
-    return [...facts.values()];
+    return rows.map((row) => ({
+      repositoryId,
+      decisionId: row.decision_id,
+      factId: row.fact_id,
+      action: row.action,
+      statement: row.statement ?? undefined,
+      rationale: row.rationale ?? undefined,
+      source: {
+        repositoryId,
+        commitSha: row.source_commit_sha,
+        reviewId: row.source_review_id,
+      },
+      evidence: JSON.parse(row.evidence_json),
+    }));
   }
 
   close() {

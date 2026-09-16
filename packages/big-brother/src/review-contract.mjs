@@ -1,3 +1,5 @@
+import { CONTEXT_DECISION_ACTIONS } from "./context-ledger.mjs";
+
 const REQUIRED_FIELDS = [
   "repository_id",
   "commit_sha",
@@ -45,6 +47,10 @@ export function validateReviewResult(result) {
     errors.push("conclusion must be a non-empty string");
   }
 
+  if (result.conclusion === "clean" && Array.isArray(result.context_decisions) && result.context_decisions.length > 0) {
+    errors.push("clean review cannot contain context decisions");
+  }
+
   if (Array.isArray(result.findings) && Array.isArray(result.evidence)) {
     const evidenceIds = new Set(result.evidence.map((item) => item?.id));
     for (const finding of result.findings) {
@@ -68,8 +74,11 @@ export function validateReviewResult(result) {
         if (typeof decision?.fact_id !== "string" || decision.fact_id.length === 0) {
           errors.push(`context decision ${decisionId} must have a non-empty fact_id`);
         }
-        if (!CONTEXT_DECISION_ACTIONS.has(decision?.action)) {
+        if (!CONTEXT_DECISION_ACTIONS.includes(decision?.action)) {
           errors.push(`context decision ${decisionId} has unsupported action: ${decision?.action}`);
+        }
+        if (typeof decision?.rationale !== "string" || decision.rationale.length === 0) {
+          errors.push(`context decision ${decisionId} must have a non-empty rationale`);
         }
         if (
           (decision?.action === "admit" || decision?.action === "correct") &&
@@ -92,5 +101,3 @@ export function validateReviewResult(result) {
 
   return { ok: errors.length === 0, errors };
 }
-
-const CONTEXT_DECISION_ACTIONS = new Set(["admit", "correct", "supersede", "retract"]);
