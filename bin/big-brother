@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+BIG_BROTHER_SCRIPT=$0
+case "$BIG_BROTHER_SCRIPT" in
+  /*) ;;
+  *) BIG_BROTHER_SCRIPT=$PWD/$BIG_BROTHER_SCRIPT ;;
+esac
+while [ -L "$BIG_BROTHER_SCRIPT" ]; do
+  BIG_BROTHER_LINK=$(readlink "$BIG_BROTHER_SCRIPT")
+  case "$BIG_BROTHER_LINK" in
+    /*) BIG_BROTHER_SCRIPT=$BIG_BROTHER_LINK ;;
+    *) BIG_BROTHER_SCRIPT=$(dirname "$BIG_BROTHER_SCRIPT")/$BIG_BROTHER_LINK ;;
+  esac
+done
+
+BIG_BROTHER_ROOT=$(CDPATH= cd -- "$(dirname "$BIG_BROTHER_SCRIPT")/.." && pwd)
+export BIG_BROTHER_LAUNCHER_PATH="$BIG_BROTHER_SCRIPT"
+export PRIME_AGENT_LAUNCHER_PATH="$BIG_BROTHER_SCRIPT"
+export BIG_BROTHER_CODING_AGENT_DIR="${BIG_BROTHER_CODING_AGENT_DIR:-$BIG_BROTHER_ROOT/.big-brother/agent}"
+export PATH="$BIG_BROTHER_ROOT/bin:$PATH"
+
+case "${1:-}" in
+  agent|config|review|watch|completion|--help|-h)
+    exec node "$BIG_BROTHER_ROOT/packages/big-brother/src/cli.mjs" "$@"
+    ;;
+esac
+
+exec node "$BIG_BROTHER_ROOT/runtime/dist/bundle/cli.js" "$@"

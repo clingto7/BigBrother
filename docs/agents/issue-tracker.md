@@ -1,7 +1,19 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all
-operations.
+Issues and specs for Big Brother itself live as GitHub Issues. Use the `gh`
+CLI for Big Brother's own planning and lifecycle operations.
+
+## Watched repository review findings
+
+Big Brother creates Review finding issues in the watched repository's GitHub
+Issues, using Big Brother's own publication policy, labels, and lifecycle
+rules. These issues are distinct from Development issues in the Big Brother
+repository.
+
+The watched repository's Matt Pocock setup and native tracker configuration may
+be read as project context, but native publication (for example, writing
+`.scratch/` local-markdown issues) is deferred. It is not part of the current
+GitHub-only publisher.
 
 ## Conventions
 

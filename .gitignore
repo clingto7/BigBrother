@@ -1,0 +1,6 @@
+.big-brother/
+config/big-brother.json
+.DS_Store
+
+# Installed dependencies are reconstructed from the package manifests.
+**/node_modules/

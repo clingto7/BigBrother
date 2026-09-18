@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+BIG_BROTHER_PACKAGE_SCRIPT=$0
+case "$BIG_BROTHER_PACKAGE_SCRIPT" in
+  /*) ;;
+  *) BIG_BROTHER_PACKAGE_SCRIPT=$PWD/$BIG_BROTHER_PACKAGE_SCRIPT ;;
+esac
+# realpath resolves both npm's global command symlink and scoped package link.
+BIG_BROTHER_PACKAGE_SCRIPT=$(realpath "$BIG_BROTHER_PACKAGE_SCRIPT")
+BIG_BROTHER_PACKAGE_ROOT=$(CDPATH= cd -- "$(dirname "$BIG_BROTHER_PACKAGE_SCRIPT")/.." && pwd -P)
+BIG_BROTHER_ROOT=$(CDPATH= cd -- "$BIG_BROTHER_PACKAGE_ROOT/../.." && pwd -P)
+exec "$BIG_BROTHER_ROOT/bin/big-brother" "$@"
