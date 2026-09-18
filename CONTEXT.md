@@ -155,3 +155,30 @@ not modify files, commits, branches, or pull-request code.
 A delivery of review activity or results through a channel outside GitHub,
 such as Feishu, WeChat, Bark, ntfy, or RSS. External notifications are outside
 the first delivery boundary.
+
+### Review execution supervisor
+
+The Big Brother control-plane role that owns the operational lifetime of a
+review attempt: starting, timing out, cancelling, retrying, and recovering the
+worker process and its temporary resources. It does not decide the semantic
+meaning of a worker result.
+
+### External review evidence
+
+Provenance-carrying output from an independent review system, such as OCR,
+provided as optional input to a Commit Review. It may guide attention or
+support a conclusion, but it does not define Big Brother's canonical review
+scope or directly authorize publication.
+
+### Focus hint
+
+A non-authoritative indication in External review evidence about paths,
+patterns, or risks worth examining. A Focus hint is not itself a finding and
+cannot replace the applicable Review scope.
+
+### Worker attempt
+
+A single bounded execution of a Commit-review worker for one Commit Review.
+Retries create new Worker attempts with the same review input identity; a
+Worker attempt is not resumed after timeout or crash and cannot replace a
+different attempt's result.
