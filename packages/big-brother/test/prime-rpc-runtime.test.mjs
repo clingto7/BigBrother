@@ -100,6 +100,7 @@ test("worker and Prime reconciliation prompts keep their authority boundaries ex
 	const workerPrompt = buildWorkerReviewPrompt({ commit_sha: "abc123" });
 	assert.match(workerPrompt, /bounded Commit-review worker/);
 	assert.match(workerPrompt, /Do not emit context_decisions or finding_issue_intents/);
+	assert.match(workerPrompt, /comments: null.*never treat missing OCR comments as a clean finding/i);
 
 	const primePrompt = buildPrimeReconciliationPrompt({
 		reviewInput: { commit_sha: "abc123" },
@@ -111,5 +112,6 @@ test("worker and Prime reconciliation prompts keep their authority boundaries ex
 	assert.match(primePrompt, /Only this pass may emit context_decisions or finding_issue_intents/);
 	assert.match(primePrompt, /fact_id.*active fact.*canonical context/i);
 	assert.match(primePrompt, /mapped finding issues/);
+	assert.match(primePrompt, /comments: null.*never treat missing OCR comments as a clean finding/i);
 	assert.match(primePrompt, /<worker-result>/);
 });
