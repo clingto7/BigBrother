@@ -1,7 +1,7 @@
 const REVIEW_INPUT_VERSION = "1";
 
 /**
- * Assemble the host-owned input passed to Prime for one immutable commit.
+ * Assemble the host-owned evidence packet for one immutable commit.
  * This is intentionally a data-only module: it does not read files, call
  * GitHub, or interpret repository instructions.
  */
@@ -15,7 +15,7 @@ export function buildReviewInput({
 	diff = "",
 	policySnapshot,
 	canonicalContext = [],
-	workspace,
+	externalReviewEvidence = null,
 }) {
 	assertNonEmpty(repositoryId, "repositoryId");
 	assertNonEmpty(commitSha, "commitSha");
@@ -24,7 +24,9 @@ export function buildReviewInput({
 	if (!Array.isArray(changedPaths)) throw new Error("changedPaths must be an array");
 	if (typeof diff !== "string") throw new Error("diff must be a string");
 	if (!Array.isArray(canonicalContext)) throw new Error("canonicalContext must be an array");
-	if (workspace !== undefined && typeof workspace !== "object") throw new Error("workspace must be an object");
+	if (externalReviewEvidence !== null && (typeof externalReviewEvidence !== "object" || Array.isArray(externalReviewEvidence))) {
+		throw new Error("externalReviewEvidence must be an object or null");
+	}
 
 	const normalizedCommit = normalizeCommit({ commit, commitSha, parentSha });
 	return {
@@ -40,19 +42,32 @@ export function buildReviewInput({
 		},
 		policy_snapshot: policySnapshot ?? null,
 		canonical_context: canonicalContext,
-		workspace: workspace
-			? {
-				directory: workspace.directory,
-				commit_sha: workspace.commitSha ?? commitSha,
-				read_only: true,
-			}
-			: null,
-			constraints: {
+		external_review_evidence: normalizeExternalReviewEvidence(externalReviewEvidence),
+		constraints: {
 				read_only: true,
 				execute_project_code: false,
 				install_dependencies: false,
 				mutate_repository: false,
 			},
+	};
+}
+
+function normalizeExternalReviewEvidence(evidence) {
+	if (evidence === null) return null;
+	const comments = Array.isArray(evidence.comments) ? evidence.comments : [];
+	const unavailable = evidence.comments === null || evidence.status === "unavailable" || evidence.status === "failed";
+	return {
+		status: unavailable ? "unavailable" : (evidence.status ?? "available"),
+		engine: evidence.engine ?? null,
+		source_range: evidence.source_range ?? null,
+		comments,
+		warnings: [
+			...(Array.isArray(evidence.warnings) ? evidence.warnings : []),
+			...(evidence.comments === null ? ["external review returned comments: null"] : []),
+			...(evidence.status === "failed" ? ["external review evidence is unavailable"] : []),
+		],
+		provenance: evidence.provenance ?? null,
+		focus_hints: Array.isArray(evidence.focus_hints) ? evidence.focus_hints : comments,
 	};
 }
 

@@ -131,13 +131,15 @@ function createService(store, github, submissions) {
 					return { directory: `/work/${commitSha}`, commitSha };
 				},
 			},
+			workerExecutor: {
+				async runAttempt({ job, reviewInput }) {
+					submissions.push(structuredClone(reviewInput));
+					return { status: "success", attemptId: "attempt-1", result: workerResultFor(job.commitSha) };
+				},
+			},
 			runtimeSupervisor: {
 				async start() {
 					return { repositoryId: "acme/app" };
-				},
-				async submitWorkerReview(_handle, input) {
-					submissions.push(structuredClone(input));
-					return workerResultFor(input.commit_sha);
 				},
 				async reconcileReview(_handle, { reviewInput }) {
 					return structuredClone(reviewResultFor(reviewInput.commit_sha));

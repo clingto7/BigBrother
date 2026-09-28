@@ -7,6 +7,10 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 	const events = [];
 	const workspace = { directory: "/work/commit-3", commitSha: "commit-3" };
 	const runtimeHandle = { repositoryId: "acme/app" };
+	const proposal = {
+		repository_id: "acme/app", commit_sha: "commit-3", parent_sha: "commit-2", observed_branches: ["main"],
+		conclusion: "clean", message_check: { status: "pass" }, findings: [], policy_checks: [], evidence: [], limitations: [], candidate_facts: [],
+	};
 	const coordinator = new ReviewCoordinator({
 		workspaceManager: {
 			async materialize(input) {
@@ -14,28 +18,14 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 				return workspace;
 			},
 		},
-		 runtimeSupervisor: {
+		workerExecutor: { async runAttempt({ job, reviewInput }) {
+			events.push(["submit-worker", job.commitSha, reviewInput]);
+			return { status: "success", attemptId: "attempt-1", result: proposal };
+		} },
+		runtimeSupervisor: {
 			async start(profile, stateNamespace) {
 				events.push(["start", profile.repositoryId, stateNamespace, profile.cwd]);
 				return runtimeHandle;
-			},
-			async submitWorkerReview(handle, input) {
-				events.push(["submit-worker", handle, input]);
-				return {
-					repository_id: input.repository_id,
-					commit_sha: input.commit_sha,
-					parent_sha: input.parent_sha,
-					observed_branches: input.observed_branches,
-					conclusion: "clean",
-					message_check: { status: "pass" },
-					findings: [],
-					policy_checks: [],
-					evidence: [],
-					limitations: [],
-					candidate_facts: [],
-					context_decisions: [],
-					finding_issue_intents: [],
-				};
 			},
 			async reconcileReview(handle, input) {
 				events.push(["reconcile", handle, input]);
@@ -83,9 +73,9 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 		store: {},
 	});
 
-	assert.deepEqual(events.map(([operation]) => operation), ["materialize", "evidence", "start", "submit-worker", "reconcile", "publish"]);
+	assert.deepEqual(events.map(([operation]) => operation), ["materialize", "evidence", "submit-worker", "start", "reconcile", "publish"]);
 	assert.deepEqual(events.find(([operation]) => operation === "start"), ["start", "acme/app", "/state/acme-app", "/work/commit-3"]);
-	assert.equal(result.reviewInput.workspace.read_only, true);
+	assert.equal("workspace" in result.reviewInput, false);
 	assert.equal(result.reviewInput.commit.parent_sha, "commit-2");
 	assert.deepEqual(result.published, { id: 7 });
 });
@@ -128,9 +118,9 @@ test("review coordinator retries reconciliation in a fresh Prime session after a
 		workspaceManager: {
 			async materialize() { return { directory: "/work/commit-3", commitSha: "commit-3" }; },
 		},
+		workerExecutor: { async runAttempt() { return { status: "success", attemptId: "attempt-1", result: workerResult }; } },
 		runtimeSupervisor: {
 			async start() { return runtimeHandle; },
-			async submitWorkerReview() { return workerResult; },
 			async reconcileReview(_handle, input) {
 				events.push(["reconcile", input.recoveryNotice, input.mappedFindingIssues]);
 				return reconciliations.shift();
@@ -194,4 +184,24 @@ test("review coordinator refuses a job from another repository", async () => {
 		}),
 		/repository.*do not match/,
 	);
+});
+
+test("review coordinator does not reconcile or publish a failed worker attempt", async () => {
+	const events = [];
+	const coordinator = new ReviewCoordinator({
+		workspaceManager: { async materialize() { return { directory: "/work/commit-3", commitSha: "commit-3" }; } },
+		evidenceProvider: async () => ({ parentSha: "commit-2" }),
+		workerExecutor: { async runAttempt() { return { status: "timed_out", attemptId: "attempt-1", error: "worker timed out" }; } },
+		runtimeSupervisor: {
+			async start() { events.push("prime-start"); return {}; },
+			async reconcileReview() { events.push("reconcile"); },
+		},
+		publisher: async () => { events.push("publish"); },
+	});
+	await assert.rejects(coordinator.process({
+		repositoryProfile: { repositoryId: "acme/app", cloneUrl: "https://github.com/acme/app.git", stateNamespace: "/state/acme-app" },
+		job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: [] },
+		store: {},
+	}), (error) => error.code === "timed_out" && error.attemptId === "attempt-1");
+	assert.deepEqual(events, []);
 });

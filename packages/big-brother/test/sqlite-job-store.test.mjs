@@ -43,3 +43,24 @@ test("SQLite Job Store persists review status transitions", () => {
   assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).status, "completed");
   store.close();
 });
+
+test("SQLite Job Store retains distinct worker attempts across reopen", () => {
+	const directory = mkdtempSync(join(tmpdir(), "big-brother-worker-attempts-"));
+	const filePath = join(directory, "state.sqlite");
+	try {
+		let store = new SqliteJobStore(filePath);
+		store.enrollBranch({ repositoryId: "acme/app", branchName: "main", headSha: "commit-2" });
+		store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-3", branchName: "main" });
+		store.recordWorkerAttempt({ repositoryId: "acme/app", commitSha: "commit-3", attemptId: "attempt-1", status: "timed_out", inputDigest: "digest-1", error: "timeout" });
+		store.recordWorkerAttempt({ repositoryId: "acme/app", commitSha: "commit-3", attemptId: "attempt-2", status: "success", inputDigest: "digest-1" });
+		store.close();
+		store = new SqliteJobStore(filePath);
+		assert.deepEqual(store.listWorkerAttempts({ repositoryId: "acme/app", commitSha: "commit-3" }).map(({ attemptId, status }) => ({ attemptId, status })), [
+			{ attemptId: "attempt-1", status: "timed_out" },
+			{ attemptId: "attempt-2", status: "success" },
+		]);
+		store.close();
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});

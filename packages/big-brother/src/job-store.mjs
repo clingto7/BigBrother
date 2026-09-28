@@ -13,6 +13,7 @@ export class InMemoryJobStore {
   #branches = new Map();
   #reviewJobs = new Map();
   #reviewResults = new Map();
+  #workerAttempts = new Map();
   #contextDecisions = new Map();
   #findingIssues = new Map();
 
@@ -98,6 +99,19 @@ export class InMemoryJobStore {
   getReviewResult({ repositoryId, commitSha }) {
     const result = this.#reviewResults.get(`${repositoryId}:${commitSha}`);
     return result ? copy(result) : undefined;
+  }
+
+  recordWorkerAttempt({ repositoryId, commitSha, attemptId, status, inputDigest, error }) {
+    if (!WORKER_ATTEMPT_STATUSES.has(status)) throw new Error(`unsupported worker attempt status: ${status}`);
+    const key = `${repositoryId}:${commitSha}`;
+    const attempts = this.#workerAttempts.get(key) ?? [];
+    if (attempts.some((attempt) => attempt.attemptId === attemptId)) throw new Error(`worker attempt already exists: ${attemptId}`);
+    attempts.push({ repositoryId, commitSha, attemptId, status, inputDigest: inputDigest ?? null, error: error ?? null });
+    this.#workerAttempts.set(key, attempts);
+  }
+
+  listWorkerAttempts({ repositoryId, commitSha }) {
+    return copy(this.#workerAttempts.get(`${repositoryId}:${commitSha}`) ?? []);
   }
 
   listReviewJobs(repositoryId) {
@@ -263,6 +277,7 @@ export class InMemoryJobStore {
 }
 
 const REVIEW_JOB_STATUSES = new Set(["pending", "reviewing", "completed", "failed"]);
+const WORKER_ATTEMPT_STATUSES = new Set(["success", "timed_out", "crashed", "cancelled", "protocol_failed"]);
 
 function assertReviewResultIdentity({ repositoryId, commitSha, reviewResult }) {
   if (

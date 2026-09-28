@@ -206,6 +206,7 @@ export async function runAgent({
 export async function runWatch(configuration, options, { stdout = console.log, stderr = console.error, servicesFactory = createRepositoryServices } = {}) {
 	const services = configuration.repositories.map((repositoryProfile) => servicesFactory(repositoryProfile));
 	let stopping = false;
+	const controller = new AbortController();
 	let resolveStop;
 	const stopped = new Promise((resolveStopped) => {
 		resolveStop = resolveStopped;
@@ -213,6 +214,7 @@ export async function runWatch(configuration, options, { stdout = console.log, s
 	const stop = () => {
 		if (stopping) return;
 		stopping = true;
+		controller.abort();
 		resolveStop();
 	};
 	process.once("SIGINT", stop);
@@ -221,7 +223,7 @@ export async function runWatch(configuration, options, { stdout = console.log, s
 		do {
 			for (const service of services) {
 				try {
-					const result = await runRepositoryCycle(service);
+					const result = await runRepositoryCycle(service, { signal: controller.signal });
 					stdout(`${service.profile.repositoryId}: discovered=${result.discovered} processed=${result.processed} failed=${result.failed} publication-retried=${result.retriedFindingIssues} publication-pending=${result.findingIssuePending.length} publication-failed=${result.findingIssueFailures.length}`);
 					for (const failure of result.findingIssueFailures) {
 						stderr(`${service.profile.repositoryId}: finding ${failure.findingId}: ${failure.lastError}`);
@@ -267,7 +269,7 @@ async function runOneShotReview(configuration, options, stdout, stderr) {
 	}
 }
 
-export async function runRepositoryCycle(service) {
+export async function runRepositoryCycle(service, { signal } = {}) {
 	const retriedFindingIssues = await retryReviewFindingIssues({
 		github: service.publishGithub,
 		store: service.store,
@@ -291,7 +293,7 @@ export async function runRepositoryCycle(service) {
 		if (job.status === "completed") continue;
 		service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "reviewing" });
 		try {
-			await processJob(service, job);
+			await processJob(service, job, { signal });
 			service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "completed" });
 			processed += 1;
 		} catch (error) {
@@ -308,12 +310,13 @@ export async function runRepositoryCycle(service) {
 	return { ...pollResult, processed, failed, retriedFindingIssues, findingIssuePending, findingIssueFailures };
 }
 
-async function processJob(service, job) {
+async function processJob(service, job, { signal } = {}) {
 	return service.coordinator.process({
 		repositoryProfile: service.profile,
 		job,
 		github: service.publishGithub,
 		store: service.store,
+		signal,
 	});
 }
 

@@ -5,6 +5,7 @@ export { pollRepository } from "./poller.mjs";
 export { publishReviewResult } from "./publisher.mjs";
 export { publishReviewFindingIssues, retryReviewFindingIssues } from "./finding-issue-publisher.mjs";
 export { ReviewCoordinator } from "./review-coordinator.mjs";
+export { WorkerExecutor } from "./worker-executor.mjs";
 export { buildInteractivePrimeLaunchOptions, loadEnvFile, runAgent, runCli, runRepositoryCycle, runWatch, parseControlArgs } from "./cli.mjs";
 export { PrimeRuntimeSupervisor } from "./prime-runtime.mjs";
 export {

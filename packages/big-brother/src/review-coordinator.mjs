@@ -1,6 +1,7 @@
 import { buildReviewInput } from "./review-input.mjs";
 import { publishReviewFindingIssues } from "./finding-issue-publisher.mjs";
 import { publishReviewResult } from "./publisher.mjs";
+import { WorkerExecutor } from "./worker-executor.mjs";
 import {
 	assertReviewResultIdentity,
 	validateReviewResult,
@@ -15,6 +16,7 @@ import {
 export class ReviewCoordinator {
 	#workspaceManager;
 	#runtimeSupervisor;
+	#workerExecutor;
 	#evidenceProvider;
 	#inputBuilder;
 	#publisher;
@@ -23,6 +25,7 @@ export class ReviewCoordinator {
 	constructor({
 		workspaceManager,
 		runtimeSupervisor,
+		workerExecutor = new WorkerExecutor(),
 		evidenceProvider,
 		inputBuilder = buildReviewInput,
 		publisher = publishReviewResult,
@@ -30,13 +33,14 @@ export class ReviewCoordinator {
 	}) {
 		this.#workspaceManager = workspaceManager;
 		this.#runtimeSupervisor = runtimeSupervisor;
+		this.#workerExecutor = workerExecutor;
 		this.#evidenceProvider = evidenceProvider;
 		this.#inputBuilder = inputBuilder;
 		this.#publisher = publisher;
 		this.#findingIssuePublisher = findingIssuePublisher;
 	}
 
-	async process({ repositoryProfile, job, github, store }) {
+	async process({ repositoryProfile, job, github, store, signal }) {
 		if (!repositoryProfile?.repositoryId) throw new Error("repository profile requires repositoryId");
 		if (repositoryProfile.repositoryId !== job?.repositoryId) {
 			throw new Error("repository profile and review job repository do not match");
@@ -71,21 +75,36 @@ export class ReviewCoordinator {
 			commitSha: job.commitSha,
 			observedBranches: job.observedBranches,
 			canonicalContext,
-			workspace,
+			externalReviewEvidence: evidence.externalReviewEvidence ?? null,
 		});
 		const runtimeProfile = { ...repositoryProfile, cwd: workspace.directory };
+		const attempt = await this.#workerExecutor.runAttempt({ job, reviewInput, signal });
+		if (attempt.status !== "success") {
+			recordWorkerAttempt(store, job, attempt);
+			const error = new Error(`worker attempt ${attempt.status}: ${attempt.error ?? "no details"}`);
+			error.code = attempt.status;
+			error.attemptId = attempt.attemptId;
+			throw error;
+		}
+		const workerResult = attempt.result;
+		const workerValidation = validateWorkerReviewResult(workerResult);
+		if (!workerValidation.ok) {
+			const error = workerProtocolError(`invalid worker review result: ${workerValidation.errors.join("; ")}`, attempt.attemptId);
+			recordWorkerAttempt(store, job, attempt, error.code, error.message);
+			throw error;
+		}
+		try {
+			assertReviewResultIdentity({ repositoryId: job.repositoryId, commitSha: job.commitSha, reviewResult: workerResult });
+		} catch (error) {
+			const protocolError = workerProtocolError(error.message, attempt.attemptId);
+			recordWorkerAttempt(store, job, attempt, protocolError.code, protocolError.message);
+			throw protocolError;
+		}
+		recordWorkerAttempt(store, job, attempt);
 		const handle = await this.#runtimeSupervisor.start(
 			runtimeProfile,
 			repositoryProfile.stateNamespace,
 		);
-		const workerResult = await this.#runtimeSupervisor.submitWorkerReview(handle, reviewInput);
-		const workerValidation = validateWorkerReviewResult(workerResult);
-		if (!workerValidation.ok) throw new Error(`invalid worker review result: ${workerValidation.errors.join("; ")}`);
-		assertReviewResultIdentity({
-			repositoryId: job.repositoryId,
-			commitSha: job.commitSha,
-			reviewResult: workerResult,
-		});
 		let reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
 			reviewInput,
 			workerResult,
@@ -132,8 +151,26 @@ export class ReviewCoordinator {
 			reviewResult,
 		});
 
-		return { reviewInput, workerResult, reviewResult, published, findingIssues, workspace };
+		return { reviewInput, workerResult, workerAttempt: attempt, reviewResult, published, findingIssues, workspace };
 	}
+}
+
+function workerProtocolError(message, attemptId) {
+	const error = new Error(message);
+	error.code = "protocol_failed";
+	error.attemptId = attemptId;
+	return error;
+}
+
+function recordWorkerAttempt(store, job, attempt, status = attempt.status, error = attempt.error) {
+	store.recordWorkerAttempt?.({
+		repositoryId: job.repositoryId,
+		commitSha: job.commitSha,
+		attemptId: attempt.attemptId,
+		status,
+		inputDigest: attempt.inputDigest,
+		error,
+	});
 }
 
 function validateReconciledReviewResult({ reviewResult, repositoryId, commitSha }) {

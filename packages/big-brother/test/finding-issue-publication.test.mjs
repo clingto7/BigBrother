@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -596,13 +597,15 @@ function coordinatorReturning(reviewResult, submissions = []) {
 				return { directory: `/work/${commitSha}`, commitSha };
 			},
 		},
+		workerExecutor: {
+			async runAttempt() {
+				submissions.push(reviewResult.commit_sha);
+				return { status: "success", attemptId: randomUUID(), result: workerResult(reviewResult) };
+			},
+		},
 		runtimeSupervisor: {
 			async start() {
 				return { repositoryId: "acme/app" };
-			},
-			async submitWorkerReview() {
-				submissions.push(reviewResult.commit_sha);
-				return workerResult(reviewResult);
 			},
 			async reconcileReview() {
 				return structuredClone(reviewResult);

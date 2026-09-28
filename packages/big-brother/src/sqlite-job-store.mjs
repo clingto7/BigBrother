@@ -39,6 +39,18 @@ export class SqliteJobStore {
         FOREIGN KEY (repository_id, commit_sha)
           REFERENCES review_jobs (repository_id, commit_sha)
       );
+      CREATE TABLE IF NOT EXISTS worker_attempts (
+        repository_id TEXT NOT NULL,
+        commit_sha TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input_digest TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (repository_id, commit_sha, attempt_id),
+        FOREIGN KEY (repository_id, commit_sha)
+          REFERENCES review_jobs (repository_id, commit_sha)
+      );
       CREATE TABLE IF NOT EXISTS context_ledger_decisions (
         repository_id TEXT NOT NULL,
         decision_id TEXT NOT NULL,
@@ -197,6 +209,28 @@ export class SqliteJobStore {
       .prepare(`SELECT review_result_json FROM review_jobs WHERE repository_id = ? AND commit_sha = ?`)
       .get(repositoryId, commitSha);
     return row?.review_result_json ? JSON.parse(row.review_result_json) : undefined;
+  }
+
+  recordWorkerAttempt({ repositoryId, commitSha, attemptId, status, inputDigest, error }) {
+    if (!WORKER_ATTEMPT_STATUSES.has(status)) throw new Error(`unsupported worker attempt status: ${status}`);
+    this.#db.prepare(`
+      INSERT INTO worker_attempts (repository_id, commit_sha, attempt_id, status, input_digest, error)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(repositoryId, commitSha, attemptId, status, inputDigest ?? null, error ?? null);
+  }
+
+  listWorkerAttempts({ repositoryId, commitSha }) {
+    return this.#db.prepare(`
+      SELECT repository_id, commit_sha, attempt_id, status, input_digest, error
+      FROM worker_attempts WHERE repository_id = ? AND commit_sha = ? ORDER BY rowid
+    `).all(repositoryId, commitSha).map((row) => ({
+      repositoryId: row.repository_id,
+      commitSha: row.commit_sha,
+      attemptId: row.attempt_id,
+      status: row.status,
+      inputDigest: row.input_digest,
+      error: row.error,
+    }));
   }
 
   listReviewJobs(repositoryId) {
@@ -442,6 +476,7 @@ export class SqliteJobStore {
 }
 
 const REVIEW_JOB_STATUSES = new Set(["pending", "reviewing", "completed", "failed"]);
+const WORKER_ATTEMPT_STATUSES = new Set(["success", "timed_out", "crashed", "cancelled", "protocol_failed"]);
 
 function assertReviewResultIdentity({ repositoryId, commitSha, reviewResult }) {
   if (
