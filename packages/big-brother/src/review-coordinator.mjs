@@ -82,6 +82,7 @@ export class ReviewCoordinator {
 			repositoryProfile.credentials?.githubReadTokenEnv,
 			repositoryProfile.credentials?.githubStatusTokenEnv,
 			repositoryProfile.credentials?.githubCheckRunTokenEnv,
+			repositoryProfile.credentials?.gitSshKeyPathEnv,
 		].filter((name) => typeof name === "string");
 		const attempt = await this.#workerExecutor.runAttempt({ job, reviewInput, signal, excludedEnvKeys: credentialEnvNames });
 		if (attempt.status !== "success") {

@@ -19,7 +19,7 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 			},
 		},
 		workerExecutor: { async runAttempt({ job, reviewInput, excludedEnvKeys }) {
-			assert.deepEqual(excludedEnvKeys, ["PRIVATE_READ", "CUSTOM_PUBLISH"]);
+			assert.deepEqual(excludedEnvKeys, ["PRIVATE_READ", "CUSTOM_PUBLISH", "CUSTOM_SSH_KEY_PATH"]);
 			events.push(["submit-worker", job.commitSha, reviewInput]);
 			return { status: "success", attemptId: "attempt-1", result: proposal };
 		} },
@@ -68,7 +68,7 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 			repositoryId: "acme/app",
 			cloneUrl: "https://github.com/acme/app.git",
 			stateNamespace: "/state/acme-app",
-			credentials: { githubReadTokenEnv: "PRIVATE_READ", githubStatusTokenEnv: "CUSTOM_PUBLISH" },
+			credentials: { githubReadTokenEnv: "PRIVATE_READ", githubStatusTokenEnv: "CUSTOM_PUBLISH", gitSshKeyPathEnv: "CUSTOM_SSH_KEY_PATH" },
 		},
 		job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: ["main"] },
 		github: {},
@@ -189,21 +189,25 @@ test("review coordinator refuses a job from another repository", async () => {
 });
 
 test("review coordinator does not reconcile or publish a failed worker attempt", async () => {
-	const events = [];
-	const coordinator = new ReviewCoordinator({
-		workspaceManager: { async materialize() { return { directory: "/work/commit-3", commitSha: "commit-3" }; } },
-		evidenceProvider: async () => ({ parentSha: "commit-2" }),
-		workerExecutor: { async runAttempt() { return { status: "timed_out", attemptId: "attempt-1", error: "worker timed out" }; } },
-		runtimeSupervisor: {
-			async start() { events.push("prime-start"); return {}; },
-			async reconcileReview() { events.push("reconcile"); },
-		},
-		publisher: async () => { events.push("publish"); },
-	});
-	await assert.rejects(coordinator.process({
-		repositoryProfile: { repositoryId: "acme/app", cloneUrl: "https://github.com/acme/app.git", stateNamespace: "/state/acme-app" },
-		job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: [] },
-		store: {},
-	}), (error) => error.code === "timed_out" && error.attemptId === "attempt-1");
-	assert.deepEqual(events, []);
+	for (const status of ["timed_out", "cleanup_failed"]) {
+		const events = [];
+		const attempts = [];
+		const coordinator = new ReviewCoordinator({
+			workspaceManager: { async materialize() { return { directory: "/work/commit-3", commitSha: "commit-3" }; } },
+			evidenceProvider: async () => ({ parentSha: "commit-2" }),
+			workerExecutor: { async runAttempt() { return { status, attemptId: `attempt-${status}`, error: `worker ${status}` }; } },
+			runtimeSupervisor: {
+				async start() { events.push("prime-start"); return {}; },
+				async reconcileReview() { events.push("reconcile"); },
+			},
+			publisher: async () => { events.push("publish"); },
+		});
+		await assert.rejects(coordinator.process({
+			repositoryProfile: { repositoryId: "acme/app", cloneUrl: "https://github.com/acme/app.git", stateNamespace: "/state/acme-app" },
+			job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: [] },
+			store: { recordWorkerAttempt: (attempt) => attempts.push(attempt) },
+		}), (error) => error.code === status && error.attemptId === `attempt-${status}`);
+		assert.deepEqual(events, []);
+		assert.equal(attempts[0].status, status);
+	}
 });

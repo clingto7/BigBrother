@@ -4,6 +4,7 @@ export const WORKER_ATTEMPT_STATUSES = Object.freeze([
 	"crashed",
 	"cancelled",
 	"protocol_failed",
+	"cleanup_failed",
 ]);
 
 export function isWorkerAttemptStatus(status) {
