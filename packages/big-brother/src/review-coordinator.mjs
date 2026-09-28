@@ -78,7 +78,12 @@ export class ReviewCoordinator {
 			externalReviewEvidence: evidence.externalReviewEvidence ?? null,
 		});
 		const runtimeProfile = { ...repositoryProfile, cwd: workspace.directory };
-		const attempt = await this.#workerExecutor.runAttempt({ job, reviewInput, signal });
+		const credentialEnvNames = [
+			repositoryProfile.credentials?.githubReadTokenEnv,
+			repositoryProfile.credentials?.githubStatusTokenEnv,
+			repositoryProfile.credentials?.githubCheckRunTokenEnv,
+		].filter((name) => typeof name === "string");
+		const attempt = await this.#workerExecutor.runAttempt({ job, reviewInput, signal, excludedEnvKeys: credentialEnvNames });
 		if (attempt.status !== "success") {
 			recordWorkerAttempt(store, job, attempt);
 			const error = new Error(`worker attempt ${attempt.status}: ${attempt.error ?? "no details"}`);

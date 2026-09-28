@@ -46,3 +46,24 @@ test("worker executor records cancellation and rejects a terminal response from 
 	});
 	assert.equal((await stale.runAttempt({ job: { repositoryId: input.repository_id, commitSha: input.commit_sha }, reviewInput: input })).status, "protocol_failed");
 });
+
+test("worker executor excludes configured GitHub credential keys with arbitrary names", async () => {
+	const key = "WORKER_TEST_GITHUB_TOKEN";
+	const oldValue = process.env[key];
+	process.env[key] = "secret-value";
+	try {
+		const executor = new WorkerExecutor({
+			command: process.execPath,
+			args: ["-e", `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const q=JSON.parse(s);const result={secret:Boolean(process.env.${key})};process.stdout.write(JSON.stringify({type:'terminal',protocol_version:'1',job_id:q.job_id,attempt_id:q.attempt_id,repository_id:q.repository_id,commit_sha:q.commit_sha,input_digest:q.input_digest,result})+'\\n')})`],
+		});
+		const outcome = await executor.runAttempt({
+			job: { repositoryId: input.repository_id, commitSha: input.commit_sha },
+			reviewInput: input,
+			excludedEnvKeys: [key],
+		});
+		assert.equal(outcome.result.secret, false);
+	} finally {
+		if (oldValue === undefined) delete process.env[key];
+		else process.env[key] = oldValue;
+	}
+});

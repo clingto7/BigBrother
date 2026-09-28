@@ -18,7 +18,8 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 				return workspace;
 			},
 		},
-		workerExecutor: { async runAttempt({ job, reviewInput }) {
+		workerExecutor: { async runAttempt({ job, reviewInput, excludedEnvKeys }) {
+			assert.deepEqual(excludedEnvKeys, ["PRIVATE_READ", "CUSTOM_PUBLISH"]);
 			events.push(["submit-worker", job.commitSha, reviewInput]);
 			return { status: "success", attemptId: "attempt-1", result: proposal };
 		} },
@@ -67,6 +68,7 @@ test("review coordinator materializes, submits, and publishes one job", async ()
 			repositoryId: "acme/app",
 			cloneUrl: "https://github.com/acme/app.git",
 			stateNamespace: "/state/acme-app",
+			credentials: { githubReadTokenEnv: "PRIVATE_READ", githubStatusTokenEnv: "CUSTOM_PUBLISH" },
 		},
 		job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: ["main"] },
 		github: {},

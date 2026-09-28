@@ -23,7 +23,7 @@ export class WorkerExecutor {
 		this.#spawn = spawnImpl;
 	}
 
-	async runAttempt({ job, reviewInput, signal }) {
+	async runAttempt({ job, reviewInput, signal, excludedEnvKeys = [] }) {
 		const attemptId = randomUUID();
 		const jobId = `${job.repositoryId}:${job.commitSha}`;
 		const inputDigest = digest(reviewInput);
@@ -54,12 +54,12 @@ export class WorkerExecutor {
 				};
 				const terminate = () => {
 					child?.kill("SIGTERM");
-					killTimer = setTimeout(() => child?.kill("SIGKILL"), 250);
+					killTimer = setTimeout(() => child?.kill("SIGKILL"), 1_500);
 				};
 				const onAbort = () => { cancelled = true; terminate(); };
 				child = this.#spawn(this.#command, this.#args, {
 					cwd: directory,
-					env: workerEnvironment(process.env),
+					env: workerEnvironment(process.env, excludedEnvKeys),
 					stdio: ["pipe", "pipe", "pipe"],
 				});
 				const timer = setTimeout(() => { timedOut = true; terminate(); }, this.#timeoutMs);
@@ -107,8 +107,11 @@ export class WorkerExecutor {
 	}
 }
 
-function workerEnvironment(source) {
-	return Object.fromEntries(Object.entries(source).filter(([key]) => !/(?:GITHUB|^GH_(?:TOKEN|ENTERPRISE_TOKEN)$|BIG_BROTHER_(?:CODING_AGENT_DIR|STATUS|PUBLICATION|READ)_TOKEN)/i.test(key)));
+function workerEnvironment(source, excludedEnvKeys = []) {
+	const excluded = new Set(excludedEnvKeys);
+	return Object.fromEntries(Object.entries(source).filter(([key]) =>
+		!excluded.has(key) && !/(?:GITHUB|^GH_(?:TOKEN|ENTERPRISE_TOKEN)$|BIG_BROTHER_(?:CODING_AGENT_DIR|STATUS|PUBLICATION|READ)_TOKEN)/i.test(key),
+	));
 }
 
 function digest(value) {

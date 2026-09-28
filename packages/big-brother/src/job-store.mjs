@@ -3,6 +3,7 @@ import {
   reconcileContextDecisionRecords,
   reduceContextLedger,
 } from "./context-ledger.mjs";
+import { isWorkerAttemptStatus } from "./worker-attempt-contract.mjs";
 
 function copy(value) {
   return structuredClone(value);
@@ -102,7 +103,7 @@ export class InMemoryJobStore {
   }
 
   recordWorkerAttempt({ repositoryId, commitSha, attemptId, status, inputDigest, error }) {
-    if (!WORKER_ATTEMPT_STATUSES.has(status)) throw new Error(`unsupported worker attempt status: ${status}`);
+		if (!isWorkerAttemptStatus(status)) throw new Error(`unsupported worker attempt status: ${status}`);
     const key = `${repositoryId}:${commitSha}`;
     const attempts = this.#workerAttempts.get(key) ?? [];
     if (attempts.some((attempt) => attempt.attemptId === attemptId)) throw new Error(`worker attempt already exists: ${attemptId}`);
@@ -277,7 +278,6 @@ export class InMemoryJobStore {
 }
 
 const REVIEW_JOB_STATUSES = new Set(["pending", "reviewing", "completed", "failed"]);
-const WORKER_ATTEMPT_STATUSES = new Set(["success", "timed_out", "crashed", "cancelled", "protocol_failed"]);
 
 function assertReviewResultIdentity({ repositoryId, commitSha, reviewResult }) {
   if (

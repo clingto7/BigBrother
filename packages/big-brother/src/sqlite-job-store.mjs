@@ -7,6 +7,7 @@ import {
   reconcileContextDecisionRecords,
   reduceContextLedger,
 } from "./context-ledger.mjs";
+import { isWorkerAttemptStatus } from "./worker-attempt-contract.mjs";
 
 export class SqliteJobStore {
   #db;
@@ -212,7 +213,7 @@ export class SqliteJobStore {
   }
 
   recordWorkerAttempt({ repositoryId, commitSha, attemptId, status, inputDigest, error }) {
-    if (!WORKER_ATTEMPT_STATUSES.has(status)) throw new Error(`unsupported worker attempt status: ${status}`);
+		if (!isWorkerAttemptStatus(status)) throw new Error(`unsupported worker attempt status: ${status}`);
     this.#db.prepare(`
       INSERT INTO worker_attempts (repository_id, commit_sha, attempt_id, status, input_digest, error)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -476,7 +477,6 @@ export class SqliteJobStore {
 }
 
 const REVIEW_JOB_STATUSES = new Set(["pending", "reviewing", "completed", "failed"]);
-const WORKER_ATTEMPT_STATUSES = new Set(["success", "timed_out", "crashed", "cancelled", "protocol_failed"]);
 
 function assertReviewResultIdentity({ repositoryId, commitSha, reviewResult }) {
   if (
