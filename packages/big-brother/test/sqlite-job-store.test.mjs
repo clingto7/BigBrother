@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 
 import { SqliteJobStore } from "../src/index.mjs";
 
@@ -42,6 +43,32 @@ test("SQLite Job Store persists review status transitions", () => {
   store.setReviewJobStatus({ repositoryId: "acme/app", commitSha: "commit-2", status: "completed" });
   assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).status, "completed");
   store.close();
+});
+
+test("SQLite Job Store migrates existing jobs and persists retry backoff", () => {
+	const directory = mkdtempSync(join(tmpdir(), "big-brother-retry-"));
+	const filePath = join(directory, "state.sqlite");
+	try {
+		const old = new DatabaseSync(filePath);
+		old.exec(`CREATE TABLE review_jobs (repository_id TEXT NOT NULL, commit_sha TEXT NOT NULL, status TEXT NOT NULL, check_run_id INTEGER, review_result_json TEXT, PRIMARY KEY (repository_id, commit_sha));`);
+		old.prepare(`INSERT INTO review_jobs (repository_id, commit_sha, status) VALUES (?, ?, ?)`)
+			.run("acme/app", "commit-2", "failed");
+		old.close();
+
+		let store = new SqliteJobStore(filePath);
+		assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).retryCount, 0);
+		store.setReviewJobStatus({ repositoryId: "acme/app", commitSha: "commit-2", status: "failed", nextRetryAt: 301_000 });
+		store.close();
+		store = new SqliteJobStore(filePath);
+		assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).retryCount, 1);
+		assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).nextRetryAt, 301_000);
+		store.setReviewJobStatus({ repositoryId: "acme/app", commitSha: "commit-2", status: "completed" });
+		assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).retryCount, 0);
+		assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).nextRetryAt, null);
+		store.close();
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("SQLite Job Store retains distinct worker attempts across reopen", () => {

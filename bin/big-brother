@@ -21,7 +21,19 @@ export BIG_BROTHER_CODING_AGENT_DIR="${BIG_BROTHER_CODING_AGENT_DIR:-$BIG_BROTHE
 export PATH="$BIG_BROTHER_ROOT/bin:$PATH"
 
 case "${1:-}" in
-  agent|config|review|watch|completion|--help|-h)
+  --version|-v)
+    printf 'big-brother %s\n' "$(cat "$BIG_BROTHER_ROOT/VERSION")"
+    exit 0
+    ;;
+esac
+
+case "${1:-}" in
+  agent|config|review|watch|completion|service|--help|-h)
+    BIG_BROTHER_ENV_FILE=${BIG_BROTHER_ENV_FILE:-${HOME}/.config/big-brother/env}
+    export BIG_BROTHER_ENV_FILE
+    if [ -f "$BIG_BROTHER_ENV_FILE" ]; then
+      exec node --env-file "$BIG_BROTHER_ENV_FILE" "$BIG_BROTHER_ROOT/packages/big-brother/src/cli.mjs" "$@"
+    fi
     exec node "$BIG_BROTHER_ROOT/packages/big-brother/src/cli.mjs" "$@"
     ;;
 esac

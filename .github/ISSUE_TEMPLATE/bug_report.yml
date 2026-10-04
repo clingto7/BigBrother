@@ -1,0 +1,39 @@
+name: Bug report
+description: Report an installation, watcher, review, or publication problem.
+title: "Bug: "
+labels: []
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Big Brother version
+      description: Output of `big-brother --version`.
+      placeholder: big-brother 0.1.0-beta.1
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node.js version, and local or remote deployment.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Describe the configuration switches and commands used. Remove repository secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste only redacted logs. Never include tokens, private keys, or model credentials.
+      render: text

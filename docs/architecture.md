@@ -7,8 +7,8 @@ plane around a long-lived Repository Prime runtime. The control plane owns
 observation, job identity, repository materialization, policy input selection,
 and GitHub publication. Repository Prime owns the durable repository
 conversation and reconciles a bounded Commit-review worker result for each
-commit review. The current static profile keeps the worker/reconciliation
-protocol explicit while native isolated child execution remains a later profile.
+commit review. The review execution supervisor runs each bounded worker attempt
+in a fresh child process and admits only identity-checked terminal output.
 
 The control plane is not an LLM loop. Repository Prime is not the GitHub
 poller, and a Commit-review worker is not the repository's final reviewer. This
@@ -17,11 +17,11 @@ tested without a model, while Prime retains the project-level reasoning that
 benefits from a long-lived context.
 
 For each repository, Repository Prime is the long-lived main agent. The review
-adapter obtains a bounded worker proposal for each immutable commit, gives that
-proposal to Prime with the durable repository context, and receives the final
-Review record. The worker cannot publish or update the Context Ledger directly.
-An isolated child worker is the target for a future RLM/Pi execution profile,
-not a claim about the current no-tools profile.
+execution supervisor obtains a bounded worker proposal for each immutable
+commit, gives that proposal to Repository Prime with durable context, and
+receives the final Review record. The worker cannot publish or update the
+Context Ledger directly. The child process uses Prime's public RPC interface;
+native RLM/Pi execution and tools remain disabled.
 
 ## Relationship to Prime and Sifu
 
@@ -166,8 +166,9 @@ must not be inferred from a generic GitHub login token. See ADRs 0012 and 0013.
 ### Workspace Manager
 
 Materializes a fixed commit and its parent diff in a disposable or reusable
-repository workspace. It guarantees that a review worker sees the requested
-SHA, not the moving branch head.
+repository workspace. It guarantees evidence is read from the requested SHA,
+not the moving branch head. The worker receives the host-built evidence packet,
+not the workspace path.
 
 The workspace is disposable from the service's perspective. It is not the
 source of truth for jobs or context, and it is never pushed back to GitHub.
@@ -189,11 +190,10 @@ for every policy input it returns.
 ### Prime Runtime Adapter
 
 Owns the seam between the deterministic control plane and one long-lived Prime
-repository runtime. It should expose only lifecycle and job-delivery behavior:
+repository runtime. It should expose only lifecycle and reconciliation behavior:
 
 ```text
 start(repository_profile, state_namespace) -> RuntimeHandle
-submit_worker_review(runtime_handle, review_input) -> WorkerReviewResult
 reconcile_review(runtime_handle, reconciliation_input) -> ReviewResult
 recover(runtime_handle) -> RuntimeStatus
 stop(runtime_handle) -> void
@@ -205,20 +205,30 @@ session JSONL layout, or Python kernel internals.
 
 The Big Brother reviewer profile is owned by
 `packages/big-brother/resources/`. Its system prompt and commit-review skill
-are passed explicitly to Prime. The adapter starts the initial static profile
-with `--no-context-files` and no tools: repository documents are selected by
-the Policy Resolver and passed as evidence, rather than being implicitly
-loaded as runtime instructions. Native RLM is a future execution profile, not
-an enabled capability of the initial no-execution profile.
+are passed explicitly to Prime. The long-lived Repository Prime starts with
+`--no-context-files` and no tools: repository documents are selected by the
+Policy Resolver and passed as evidence, rather than being implicitly loaded as
+runtime instructions.
 
-For each review input, the adapter exposes two explicit phases. The bounded
-Commit-review worker receives the fixed commit and selected policy and returns
-evidence-backed findings plus candidate facts. Repository Prime then receives
-that worker result together with the canonical context, reconciles it, and
-returns the final ReviewResult. The worker cannot emit durable context decisions
-or issue intents. The initial static profile implements the worker and
-reconciliation passes through the structured Prime RPC seam; enabling native
-isolated RLM/Pi workers remains a separate execution-profile decision.
+### Review Execution Supervisor
+
+Runs one fresh child process for each Commit-review worker attempt. Its public
+seam is:
+
+```text
+runAttempt(job, reviewInput, signal) -> WorkerAttempt
+```
+
+The child starts a bounded Prime RPC runtime, receives the host-built evidence
+packet without a workspace path, and returns one terminal JSONL response. The
+supervisor enforces timeout, cancellation, output bounds, process cleanup, and
+matching job, attempt, commit, digest, and protocol identities. Failures remain
+explicit and cannot enter Prime reconciliation or GitHub publication. This is
+a process/lifecycle boundary, not an OS filesystem or network sandbox.
+
+After worker admission, the long-lived Repository Prime receives the proposal
+with canonical context, reconciles it, and returns the final ReviewResult. The
+worker cannot emit durable context decisions or finding-issue intents.
 
 ### Review Contract
 
@@ -282,11 +292,13 @@ flowchart LR
   G --> J[Job store]
   J --> W[Workspace manager]
   W --> R[Policy resolver]
-  R --> X[Prime runtime per repository]
-  X --> K[RLM/Pi worker per commit]
-  K --> V[Review contract validator]
-  V --> L[Context ledger]
-  V --> U[Commit Status publisher]
+  R --> E[Review execution supervisor]
+  E --> K[One-shot Prime RPC worker]
+  K --> V[Worker result admission]
+  V --> X[Repository Prime per repository]
+  X --> Q[Final review validation]
+  Q --> L[Context ledger]
+  Q --> U[Commit Status publisher]
   U --> G
   L --> X
 ```
@@ -327,30 +339,19 @@ mechanism rather than embedded in service unit files.
 ## Review sandbox
 
 Prime's RLM kernel is a powerful execution environment, not a security sandbox.
-The initial static profile does not execute project code, so an OCI runtime is
-optional rather than a startup prerequisite. If an execution-capable profile
-is enabled, the outer rootless OCI runtime becomes mandatory. Podman is the
-reference runtime; Docker is a compatible deployment Adapter. See ADR 0008.
+The current static profile does not execute project code, so an OCI runtime is
+not a startup prerequisite. The parent reads the fixed workspace and selected
+policy files; the model-facing worker gets a serialized evidence packet, no
+workspace path, and no tools. Its child process has an allowlisted environment
+and no configured GitHub publication credential, but it still runs as the same
+OS user and has no enforced filesystem or network sandbox. See ADR 0008.
 
-The MVP review profile permits reading the fixed workspace, Git metadata, and
-selected policy files. It does not run project scripts, build commands, tests,
-package managers, or dependency installation. Network access is limited to
-the model provider and GitHub paths needed by the control plane; repository
-workspace processes receive no host credentials, no push credential, and no
-unbounded host filesystem access.
-
-The profile should be enforced in two layers:
-
-1. Big Brother's Review Contract and Prime resource loadout restrict what the
-   worker is asked and allowed to do.
-2. Docker/Podman, filesystem mounts, process limits, network policy, and secret
-injection provide the actual containment if a model, extension, or document
-attempts something outside the profile.
-
-The initial profile may run the control plane and Prime as a dedicated host
-process with restricted tools and service-owned directories. If execution is
-later enabled, worker containers must be separately managed and must not
-receive GitHub credentials or a host container-engine socket.
+If a future profile enables repository tools, scripts, builds, or tests, an
+outer rootless OCI runtime becomes mandatory. Podman is the reference runtime;
+Docker is compatible. Separate worker containers, read-only repository mounts,
+scratch storage, process/resource limits, network policy, and secret isolation
+must provide actual containment. Workers must not receive GitHub credentials
+or a host container-engine socket.
 
 Prompt injection in README files, commit messages, issue text, or source code
 is repository content and never becomes control-plane policy.
@@ -382,10 +383,18 @@ is repository content and never becomes control-plane policy.
 5. **Complete:** provide macOS `launchd` and Linux `systemd` deployment
    adapters for the foreground Watch service; host activation remains an
    operator step.
-6. **Next:** complete the Big Brother-owned Context Ledger persistence and
-   Prime context reconstruction/recovery path.
-7. **Later:** add external notification adapters only after GitHub publication
-   and restart recovery are reliable.
+6. **Complete:** persist the Big Brother-owned Context Ledger and reconstruct
+   Repository Prime context after restart.
+7. **Complete:** run each worker attempt as a fresh child process with a
+   validated one-shot protocol and explicit failure/cleanup outcomes.
+8. **Complete:** controlled real-host and real-GitHub acceptance testing:
+   first enrollment, pushed commit review, finding publication and explicit
+   resolution, plus process restart recovery.
+9. **Next:** publish the first preview release and validate the archive on a
+   fresh host through the release workflow.
+10. **Later, conditional:** implement a real read-only OCI sandbox before
+   enabling execution-capable worker tools. External notifications remain a
+   later product decision after reliable operation is demonstrated.
 
 This sequence keeps the hardest model/runtime seam behind a small Interface
 and allows most correctness work to proceed deterministically.

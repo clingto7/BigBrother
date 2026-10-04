@@ -30,6 +30,8 @@ export class SqliteJobStore {
         status TEXT NOT NULL,
         check_run_id INTEGER,
         review_result_json TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        next_retry_at INTEGER,
         PRIMARY KEY (repository_id, commit_sha)
       );
       CREATE TABLE IF NOT EXISTS review_job_branches (
@@ -87,6 +89,8 @@ export class SqliteJobStore {
     const columns = this.#db.prepare(`PRAGMA table_info(review_jobs)`).all().map((row) => row.name);
     if (!columns.includes("check_run_id")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN check_run_id INTEGER`);
     if (!columns.includes("review_result_json")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN review_result_json TEXT`);
+    if (!columns.includes("retry_count")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`);
+    if (!columns.includes("next_retry_at")) this.#db.exec(`ALTER TABLE review_jobs ADD COLUMN next_retry_at INTEGER`);
     const findingIssueColumns = this.#db.prepare(`PRAGMA table_info(review_finding_issues)`).all().map((row) => row.name);
     for (const [name, definition] of [
       ["desired_lifecycle_status", "TEXT NOT NULL DEFAULT 'active'"],
@@ -162,7 +166,7 @@ export class SqliteJobStore {
 
   getReviewJob({ repositoryId, commitSha }) {
     const job = this.#db
-      .prepare(`SELECT repository_id, commit_sha, status, check_run_id FROM review_jobs WHERE repository_id = ? AND commit_sha = ?`)
+      .prepare(`SELECT repository_id, commit_sha, status, check_run_id, retry_count, next_retry_at FROM review_jobs WHERE repository_id = ? AND commit_sha = ?`)
       .get(repositoryId, commitSha);
     if (!job) return undefined;
     const branches = this.#db
@@ -179,6 +183,8 @@ export class SqliteJobStore {
       observedBranches: branches,
       status: job.status,
       checkRunId: job.check_run_id ?? null,
+      retryCount: job.retry_count,
+      nextRetryAt: job.next_retry_at,
     };
   }
 
@@ -189,11 +195,18 @@ export class SqliteJobStore {
     if (Number(result.changes) !== 1) throw new Error(`review job does not exist: ${repositoryId}:${commitSha}`);
   }
 
-  setReviewJobStatus({ repositoryId, commitSha, status }) {
+  setReviewJobStatus({ repositoryId, commitSha, status, nextRetryAt }) {
     if (!REVIEW_JOB_STATUSES.has(status)) throw new Error(`unsupported review job status: ${status}`);
-    const result = this.#db
-      .prepare(`UPDATE review_jobs SET status = ? WHERE repository_id = ? AND commit_sha = ?`)
-      .run(status, repositoryId, commitSha);
+    if (nextRetryAt !== undefined && (status !== "failed" || !Number.isSafeInteger(nextRetryAt) || nextRetryAt < 0)) {
+      throw new Error("nextRetryAt requires a failed job and a non-negative timestamp");
+    }
+    const statement = nextRetryAt !== undefined
+      ? `UPDATE review_jobs SET status = ?, retry_count = retry_count + 1, next_retry_at = ? WHERE repository_id = ? AND commit_sha = ?`
+      : status === "completed"
+        ? `UPDATE review_jobs SET status = ?, retry_count = 0, next_retry_at = NULL WHERE repository_id = ? AND commit_sha = ?`
+        : `UPDATE review_jobs SET status = ? WHERE repository_id = ? AND commit_sha = ?`;
+    const args = nextRetryAt !== undefined ? [status, nextRetryAt, repositoryId, commitSha] : [status, repositoryId, commitSha];
+    const result = this.#db.prepare(statement).run(...args);
     if (Number(result.changes) !== 1) throw new Error(`review job does not exist: ${repositoryId}:${commitSha}`);
   }
 

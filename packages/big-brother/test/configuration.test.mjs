@@ -23,7 +23,17 @@ test("configuration owns repository watch settings while preserving credential r
 	assert.deepEqual(configuration.repositories[0].trackedBranches, ["main", "release"]);
 	assert.deepEqual(configuration.repositories[0].credentials, repository.credentials);
 	assert.deepEqual(configuration.repositories[0].reviewFindingIssueLabels, ["big-brother", "security"]);
+	assert.equal(configuration.repositories[0].publishFindingIssues, true);
 	assert.equal(configuration.repositories[0].githubReadToken, undefined);
+});
+
+test("configuration accepts only a boolean finding issue publication switch", () => {
+	const disabled = loadConfiguration({ repositories: [{ ...repository, publishFindingIssues: false }] });
+	assert.equal(disabled.repositories[0].publishFindingIssues, false);
+	assert.throws(
+		() => loadConfiguration({ repositories: [{ ...repository, publishFindingIssues: "false" }] }),
+		/publishFindingIssues must be a boolean/,
+	);
 });
 
 test("configuration rejects invalid Review finding issue labels", () => {

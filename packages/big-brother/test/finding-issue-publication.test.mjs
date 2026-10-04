@@ -64,6 +64,58 @@ test("a completed repository cycle publishes and durably maps a Prime-approved f
 	store.close();
 });
 
+test("disabled finding issue publication stages intents without GitHub writes and resumes later", async () => {
+	const store = preparedStore();
+	const calls = [];
+	const github = {
+		async createCommitStatus() { calls.push("status"); return { id: 7 }; },
+		async findIssueByFindingId() { return undefined; },
+		async createIssue() { calls.push("issue"); return { number: 42, html_url: "https://github.com/acme/app/issues/42" }; },
+	};
+	const input = cycleInput(store, github);
+	input.repositoryProfile.publishFindingIssues = false;
+	await coordinatorReturning(actionableReview()).process(input);
+	assert.deepEqual(calls, ["status"]);
+	assert.equal(store.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).status, "pending");
+	store.setReviewJobStatus({ repositoryId: "acme/app", commitSha: "commit-3", status: "completed" });
+
+	const service = repositoryService({ store, github, submissions: [] });
+	service.profile.publishFindingIssues = false;
+	const paused = await runRepositoryCycle(service);
+	assert.equal(paused.retriedFindingIssues, 0);
+	assert.deepEqual(calls, ["status"]);
+	assert.equal(paused.findingIssuePending.length, 1);
+
+	service.profile.publishFindingIssues = true;
+	const resumed = await runRepositoryCycle(service);
+	assert.equal(resumed.retriedFindingIssues, 1);
+	assert.deepEqual(calls, ["status", "issue"]);
+	assert.equal(store.getFindingIssue({ repositoryId: "acme/app", findingId: "auth-null-bypass" }).status, "published");
+	store.close();
+});
+
+test("finding issues never render missing evidence fields as undefined", async () => {
+	const store = preparedStore();
+	let issueBody;
+	const github = {
+		async createCommitStatus() { return { id: 7 }; },
+		async createIssue(input) {
+			issueBody = input.body;
+			return { number: 43, html_url: "https://github.com/acme/app/issues/43" };
+		},
+	};
+	const reviewResult = actionableReview({
+		evidence: [{ id: "E1", commit_sha: "commit-3", quote: "the null branch skips authorization" }],
+	});
+
+	await coordinatorReturning(reviewResult).process(cycleInput(store, github, reviewResult));
+
+	assert.doesNotMatch(issueBody, /undefined/);
+	assert.match(issueBody, /commit `commit-3`/);
+	assert.match(issueBody, /the null branch skips authorization/);
+	store.close();
+});
+
 test("first publication reconciles an existing stable marker before creating an issue", async () => {
 	const store = preparedStore();
 	const calls = [];
@@ -148,6 +200,8 @@ test("an Issues permission failure leaves Commit Status published and records a 
 		discovered: 0,
 		processed: 1,
 		failed: 0,
+		deferred: 0,
+		jobFailures: [],
 		retriedFindingIssues: 0,
 		findingIssuePending: [],
 		findingIssueFailures: [

@@ -42,10 +42,12 @@ supports multiple repositories with independent Prime and state boundaries.
    implicit historical backfill.
 3. Newly discovered commits are enqueued at least once and deduplicated by
    repository plus commit SHA.
-4. The service materializes the fixed commit and its parent diff in the
-   sandboxed runtime.
-5. Repository Prime provides the applicable project policy and canonical
-   context to an isolated Commit-review worker.
+4. The service materializes and verifies the fixed commit, then builds a
+   parent-owned evidence packet. The workspace itself is not passed to the
+   worker.
+5. The review execution supervisor starts one fresh child process for the
+   attempt. The child runs the bounded Commit-review prompt through Prime's
+   public JSONL RPC interface.
 6. The worker checks the commit message, any repository-verifiable message
    template, documented policy, and clear correctness/security/regression
    evidence in the diff.
@@ -78,8 +80,10 @@ repository-content modification permission. The static review profile does not
 execute code, tests, builds, scripts, or dependency installation, so it does
 not require Docker or Podman. Durable state remains in a service-owned
 directory; secrets are supplied by runtime configuration rather than stored in
-the repository. OCI isolation remains a future option for execution-capable
-profiles.
+the repository. The child receives an allowlisted process environment, no
+workspace path, and no configured GitHub publication credentials. This is a
+process boundary, not an OS filesystem or network sandbox: OCI isolation remains
+required before enabling execution-capable tools.
 
 ## Defaults that do not need separate design decisions yet
 
@@ -92,60 +96,32 @@ profiles.
 These defaults can be changed by a later ADR if the first prototype or
 production operation exposes a real limitation.
 
-## Current implementation status
+## Current implementation status (2026-10-04)
 
-- Phase 0 is complete: the independent `big-brother` launcher and pinned
-  Prime-derived runtime are present under `bin/`, `runtime/`, and
-  `config-sources/prime-agent/`.
-- Phase 1 is started: the deterministic core package under
-  `packages/big-brother/` covers branch baseline enrollment, repository+SHA
-  job deduplication, parent-policy selection, review-result validation, and
-  cursor-based commit discovery behind a GitHub Adapter seam. A native
-  `fetch`-based GitHub REST Adapter and non-blocking Commit Status Publisher are
-  also covered by contract tests. Node's built-in SQLite provides the first
-  persistent Job Store Adapter.
-- Workspace materialization, Prime job delivery, failed-attempt recovery, and
-  the foreground continuous watch loop are implemented. Platform service
-  definition renderers for macOS `launchd` and Linux `systemd` are also
-  implemented; activating them remains an operator deployment step.
+- **Core control plane complete:** independent launcher and pinned
+  Prime-derived runtime; validated configuration; GitHub polling and REST
+  adapters; fixed-SHA workspace/evidence collection; SQLite job and context
+  state; Commit Status and Prime-approved finding-issue publication.
+- **Repository context complete:** Repository Prime reconciles candidate facts
+  against the durable Context Ledger, with provenance, correction/retraction,
+  and restart recovery covered by deterministic tests.
+- **Worker lifecycle complete:** each review uses a fresh child process and a
+  one-request/one-terminal JSONL protocol. The supervisor checks job, attempt,
+  commit, digest, and protocol identity; handles timeout/cancellation/crash;
+  records cleanup failures; and prevents failed attempts from reaching Prime
+  reconciliation or publication.
+- **Static review profile:** worker receives a host-built evidence packet, not
+  a workspace path. Prime tools and native RLM/Pi execution remain disabled;
+  project code and tests are not run.
+- **OCR boundary:** review input accepts provenance-bearing external evidence
+  as advisory Focus hints. Automatic OCR retrieval is not implemented; the OCR
+  CI lane remains separate.
+- **Deployment:** foreground watch and `launchd`/`systemd` definition renderers
+  are implemented. A Linux user service on Sentry completed a real GitHub
+  finding/repair cycle on an isolated test branch. The first public release
+  workflow still requires its own GitHub Actions run.
 
-- The Big Brother-owned static reviewer profile is now present under
-  `packages/big-brother/resources/`. It supplies the system prompt and
-  commit-review skill, disables automatic project-context loading and tools,
-  and deliberately leaves native RLM disabled until a constrained execution
-  profile is designed.
-
-- `PrimeRpcRuntimeFactory` now connects that profile to the pinned Prime bundle
-  through the public JSONL RPC mode. It is tested with an injected client;
-  production host-generated evidence packing and full Prime-ledger recovery
-  remain to be implemented.
-
-- `buildReviewInput` now defines the host-owned evidence packet for one fixed
-  commit, including parent, diff, policy snapshot, canonical context,
-  workspace identity, and explicit no-execution constraints.
-
-- `ReviewCoordinator` now provides the first deterministic one-job orchestration
-  seam. Tests use injected adapters and do not call a model.
-
-- `GitReviewEvidenceAdapter` now provides the first concrete evidence provider:
-  it reads commit metadata/diff and policy documents from the verified detached
-  workspace, applying the parent-policy rule for policy-changing commits.
-
-- The control-plane configuration loader now validates GitHub repositories,
-  tracked branches, polling, state namespaces, and environment-variable
-  credential references without accepting secret values or Prime provider/model
-  settings in the configuration object.
-
-- The project now exposes a direct `big-brother` CLI through the package `bin`
-  entry. `npm link ./packages/big-brother` installs the local command, and
-  Bash/Zsh/Fish completion scripts are available through
-  `big-brother completion <shell>`.
-
-The Prime Runtime Supervisor and its production RPC factory are now connected
-to the pinned Prime runtime without exposing Prime's private protocol. A live
-model call still depends on the operator's Prime login and network setup.
-
-The sandbox decision is recorded in ADR 0008: the initial static profile does
-not require a container. Podman rootless remains the reference OCI runtime for
-future execution-capable profiles, with Docker compatibility. Neither engine
-is started by the development tests.
+The package test suite uses deterministic adapters and child-process fixtures.
+It does not call a live model or GitHub API. The initial static profile does
+not require a container; Podman rootless remains the reference OCI runtime for
+any future execution-capable profile, with Docker compatibility.
