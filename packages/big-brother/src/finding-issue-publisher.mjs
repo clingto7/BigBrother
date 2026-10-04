@@ -1,6 +1,6 @@
 import { findingIssueIntentAction } from "./review-contract.mjs";
 
-export async function publishReviewFindingIssues({ github, store, reviewResult, labels = [] }) {
+export async function publishReviewFindingIssues({ github, store, reviewResult, labels = [], publish = true }) {
 	const findingsById = new Map(reviewResult.findings.map((finding) => [finding.id, finding]));
 	const evidenceById = new Map(reviewResult.evidence.map((item) => [item.id, item]));
 	const publications = [];
@@ -19,7 +19,7 @@ export async function publishReviewFindingIssues({ github, store, reviewResult, 
 				commitSha: reviewResult.commit_sha,
 			});
 			const state = store.getFindingIssueState({ repositoryId: reviewResult.repository_id, findingId });
-			await attemptPublication({ github, store, publication: state, reconcile: false });
+			if (publish) await attemptPublication({ github, store, publication: state, reconcile: false });
 			publications.push(store.getFindingIssue({ repositoryId: reviewResult.repository_id, findingId }));
 			continue;
 		}
@@ -37,7 +37,7 @@ export async function publishReviewFindingIssues({ github, store, reviewResult, 
 		};
 		store.stageFindingIssue(publication);
 		const state = store.getFindingIssueState({ repositoryId: publication.repositoryId, findingId });
-		await attemptPublication({ github, store, publication: state, reconcile: false });
+		if (publish) await attemptPublication({ github, store, publication: state, reconcile: false });
 		publications.push(store.getFindingIssue({
 			repositoryId: reviewResult.repository_id,
 			findingId,
@@ -142,11 +142,20 @@ function publicationError(error) {
 }
 
 function issueBody({ reviewResult, finding, evidenceById }) {
-	const evidence = finding.evidence_refs.map((evidenceId) => evidenceById.get(evidenceId));
-	const evidenceLines = evidence.map((item) => {
-		const location = `${item.path}${item.line ? `:${item.line}` : ""}`;
-		const description = item.description ?? item.message;
-		return `- \`${location}\`${description ? ` — ${description}` : ""}`;
+	const evidence = finding.evidence_refs.map((evidenceId) => ({
+		id: evidenceId,
+		item: evidenceById.get(evidenceId),
+	}));
+	const evidenceLines = evidence.map(({ id, item }) => {
+		if (!item) return `- Evidence \`${id}\` — evidence record unavailable.`;
+		const path = item.path ?? item.file_path ?? item.source_path ?? item.file;
+		const line = item.line ?? item.line_number;
+		const commitSha = item.commit_sha ?? item.commitSha;
+		const description = item.description ?? item.message ?? item.quote ?? item.snippet;
+		const location = path
+			? `\`${path}${line ? `:${line}` : ""}\``
+			: `Evidence \`${id}\` — ${commitSha ? `commit \`${commitSha}\`` : "source location unavailable"}`;
+		return `- ${location}${description ? ` — ${description}` : ""}`;
 	});
 	const limitationLines = reviewResult.limitations.map((limitation) =>
 		`- ${typeof limitation === "string" ? limitation : limitation.description ?? limitation.message ?? JSON.stringify(limitation)}`

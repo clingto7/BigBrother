@@ -73,6 +73,9 @@ export function validateConfiguration(configuration) {
 		) {
 			errors.push(`${prefix}.reviewFindingIssueLabels must contain non-empty strings`);
 		}
+		if (repository.publishFindingIssues !== undefined && typeof repository.publishFindingIssues !== "boolean") {
+			errors.push(`${prefix}.publishFindingIssues must be a boolean`);
+		}
 		validateCredentialRefs(repository, prefix, errors);
 		for (const field of ["provider", "model"]) {
 			if (repository[field] !== undefined) errors.push(`${prefix}.${field} is Prime-owned; configure it with 'big-brother agent'`);
@@ -91,6 +94,7 @@ function normalizeConfiguration(configuration) {
 			trackedBranches: [...new Set(repository.trackedBranches)],
 			stateNamespace: repository.stateNamespace,
 			reviewFindingIssueLabels: [...new Set(repository.reviewFindingIssueLabels ?? [])],
+			publishFindingIssues: repository.publishFindingIssues ?? true,
 			credentials: repository.credentials ? { ...repository.credentials } : {},
 		})),
 	};

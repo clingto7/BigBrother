@@ -111,13 +111,20 @@ export class ReviewCoordinator {
 			runtimeProfile,
 			repositoryProfile.stateNamespace,
 		);
-		let reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
-			reviewInput,
-			workerResult,
-			canonicalContext,
-			mappedFindingIssues,
-		});
+		const cancelRuntime = () => {
+			void Promise.resolve().then(() => this.#runtimeSupervisor.cancel(handle)).catch(() => undefined);
+		};
+		signal?.addEventListener("abort", cancelRuntime, { once: true });
+		if (signal?.aborted) cancelRuntime();
+		let reviewResult;
 		try {
+			if (signal?.aborted) throw new Error("review cancelled");
+			reviewResult = await this.#runtimeSupervisor.reconcileReview(handle, {
+				reviewInput,
+				workerResult,
+				canonicalContext,
+				mappedFindingIssues,
+			});
 			validateReconciledReviewResult({ reviewResult, repositoryId: job.repositoryId, commitSha: job.commitSha });
 			validateContextDecisions(store, job, reviewResult);
 		} catch (error) {
@@ -132,6 +139,8 @@ export class ReviewCoordinator {
 			});
 			validateReconciledReviewResult({ reviewResult, repositoryId: job.repositoryId, commitSha: job.commitSha });
 			validateContextDecisions(store, job, reviewResult);
+		} finally {
+			signal?.removeEventListener("abort", cancelRuntime);
 		}
 		const published = await this.#publisher({
 			github,
@@ -143,6 +152,7 @@ export class ReviewCoordinator {
 			store,
 			reviewResult,
 			labels: repositoryProfile.reviewFindingIssueLabels ?? [],
+			publish: repositoryProfile.publishFindingIssues !== false,
 		});
 		if (reviewResult.context_decisions?.length > 0) {
 			store.recordContextDecisions({

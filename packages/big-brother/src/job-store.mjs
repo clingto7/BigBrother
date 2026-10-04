@@ -54,6 +54,8 @@ export class InMemoryJobStore {
       observedBranches: [branchName],
       status: "pending",
       checkRunId: null,
+      retryCount: 0,
+      nextRetryAt: null,
     };
     this.#reviewJobs.set(key, job);
     return { created: true, job: copy(job) };
@@ -82,10 +84,18 @@ export class InMemoryJobStore {
     job.checkRunId = checkRunId;
   }
 
-  setReviewJobStatus({ repositoryId, commitSha, status }) {
+  setReviewJobStatus({ repositoryId, commitSha, status, nextRetryAt }) {
     if (!REVIEW_JOB_STATUSES.has(status)) throw new Error(`unsupported review job status: ${status}`);
     const job = this.#reviewJobs.get(`${repositoryId}:${commitSha}`);
     if (!job) throw new Error(`review job does not exist: ${repositoryId}:${commitSha}`);
+    if (nextRetryAt !== undefined) {
+      if (status !== "failed" || !Number.isSafeInteger(nextRetryAt) || nextRetryAt < 0) throw new Error("nextRetryAt requires a failed job and a non-negative timestamp");
+      job.retryCount += 1;
+      job.nextRetryAt = nextRetryAt;
+    } else if (status === "completed") {
+      job.retryCount = 0;
+      job.nextRetryAt = null;
+    }
     job.status = status;
   }
 

@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  prerelease:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check tag and test
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          test "$TAG" = "v$(cat VERSION)"
+          npm test --prefix packages/big-brother
+          ./bin/big-brother --version
+          ./bin/big-brother config validate --config config/big-brother.example.json
+      - name: Build release archive
+        run: sh scripts/build-release.sh "$RUNNER_TEMP/release"
+      - name: Check archive
+        run: |
+          cd "$RUNNER_TEMP/release"
+          sha256sum -c "big-brother-$(cat "$GITHUB_WORKSPACE/VERSION").tar.gz.sha256"
+          version=$(cat "$GITHUB_WORKSPACE/VERSION")
+          mkdir -p "$RUNNER_TEMP/install"
+          tar -xzf "big-brother-$version.tar.gz" -C "$RUNNER_TEMP/install"
+          export HOME="$RUNNER_TEMP/isolated-home"
+          mkdir -p "$HOME"
+          sh "$RUNNER_TEMP/install/big-brother-$version/scripts/install.sh"
+          "$HOME/.local/bin/big-brother" --version
+          "$HOME/.local/bin/big-brother" config validate --config "$RUNNER_TEMP/install/big-brother-$version/config/big-brother.example.json"
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" "$RUNNER_TEMP"/release/* \
+            --verify-tag --prerelease --title "$TAG" \
+            --notes-file "docs/releases/$TAG.md"

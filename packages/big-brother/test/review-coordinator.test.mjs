@@ -172,6 +172,39 @@ test("review coordinator retries reconciliation in a fresh Prime session after a
 	assert.deepEqual(result.reviewResult, validResult);
 });
 
+test("review coordinator cancels an active Prime reconciliation when stopping", async () => {
+	const controller = new AbortController();
+	let rejectReconciliation;
+	let cancelled = false;
+	const coordinator = new ReviewCoordinator({
+		workspaceManager: { async materialize() { return { directory: "/work/commit-3", commitSha: "commit-3" }; } },
+		evidenceProvider: async () => ({ parentSha: "commit-2" }),
+		workerExecutor: { async runAttempt({ job }) {
+			return { status: "success", attemptId: "attempt-1", result: {
+				repository_id: job.repositoryId, commit_sha: job.commitSha, parent_sha: "commit-2", observed_branches: [],
+				conclusion: "clean", message_check: { status: "pass" }, findings: [], policy_checks: [], evidence: [], limitations: [], candidate_facts: [],
+			} };
+		} },
+		runtimeSupervisor: {
+			async start() { return { repositoryId: "acme/app" }; },
+			reconcileReview() {
+				return new Promise((_, reject) => { rejectReconciliation = reject; });
+			},
+			async cancel() { cancelled = true; rejectReconciliation(new Error("Prime RPC client stopped")); },
+		},
+	});
+	const review = coordinator.process({
+		repositoryProfile: { repositoryId: "acme/app", cloneUrl: "https://github.com/acme/app.git", stateNamespace: "/state/acme-app" },
+		job: { repositoryId: "acme/app", commitSha: "commit-3", observedBranches: [] },
+		store: {},
+		signal: controller.signal,
+	});
+	await new Promise((resolve) => setImmediate(resolve));
+	controller.abort();
+	await assert.rejects(review, /Prime RPC client stopped/);
+	assert.equal(cancelled, true);
+});
+
 test("review coordinator refuses a job from another repository", async () => {
 	const coordinator = new ReviewCoordinator({
 		workspaceManager: { async materialize() {} },

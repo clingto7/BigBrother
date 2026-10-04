@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 
 import { loadConfigurationFile } from "./configuration.mjs";
 import { GitHubRestAdapter } from "./github-rest.mjs";
@@ -224,9 +225,12 @@ export async function runWatch(configuration, options, { stdout = console.log, s
 			for (const service of services) {
 				try {
 					const result = await runRepositoryCycle(service, { signal: controller.signal });
-					stdout(`${service.profile.repositoryId}: discovered=${result.discovered} processed=${result.processed} failed=${result.failed} publication-retried=${result.retriedFindingIssues} publication-pending=${result.findingIssuePending.length} publication-failed=${result.findingIssueFailures.length}`);
+					stdout(`${service.profile.repositoryId}: discovered=${result.discovered} processed=${result.processed} failed=${result.failed} publication-retried=${result.retriedFindingIssues} publication-pending=${result.findingIssuePending.length} publication-failed=${result.findingIssueFailures.length} review-deferred=${result.deferred}`);
 					for (const failure of result.findingIssueFailures) {
 						stderr(`${service.profile.repositoryId}: finding ${failure.findingId}: ${failure.lastError}`);
+					}
+					for (const failure of result.jobFailures) {
+						stderr(`${service.profile.repositoryId}@${failure.commitSha}: review failed: ${failure.error}`);
 					}
 				} catch (error) {
 					stderr(`${service.profile.repositoryId}: cycle failed: ${error.message}`);
@@ -261,7 +265,7 @@ async function runOneShotReview(configuration, options, stdout, stderr) {
 				stderr(`${profile.repositoryId}: finding ${failure.findingId}: ${failure.lastError}`);
 			}
 		} catch (error) {
-			service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "failed" });
+			service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "failed", nextRetryAt: Date.now() + reviewRetryDelay(job.retryCount ?? 0) });
 			throw error;
 		}
 	} finally {
@@ -269,8 +273,8 @@ async function runOneShotReview(configuration, options, stdout, stderr) {
 	}
 }
 
-export async function runRepositoryCycle(service, { signal } = {}) {
-	const retriedFindingIssues = await retryReviewFindingIssues({
+export async function runRepositoryCycle(service, { signal, now = Date.now } = {}) {
+	const retriedFindingIssues = service.profile.publishFindingIssues === false ? 0 : await retryReviewFindingIssues({
 		github: service.publishGithub,
 		store: service.store,
 		repositoryId: service.profile.repositoryId,
@@ -289,16 +293,29 @@ export async function runRepositoryCycle(service, { signal } = {}) {
 	});
 	let processed = 0;
 	let failed = 0;
+	let deferred = 0;
+	const jobFailures = [];
 	for (const job of service.store.listReviewJobs(service.profile.repositoryId)) {
 		if (job.status === "completed") continue;
+		if (job.status === "failed" && job.nextRetryAt != null && job.nextRetryAt > now()) {
+			deferred += 1;
+			continue;
+		}
 		service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "reviewing" });
 		try {
 			await processJob(service, job, { signal });
 			service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "completed" });
 			processed += 1;
 		} catch (error) {
-			service.store.setReviewJobStatus({ repositoryId: job.repositoryId, commitSha: job.commitSha, status: "failed" });
+			service.store.setReviewJobStatus({
+				repositoryId: job.repositoryId,
+				commitSha: job.commitSha,
+				status: "failed",
+				...(signal?.aborted ? {} : { nextRetryAt: now() + reviewRetryDelay(job.retryCount ?? 0) }),
+			});
 			failed += 1;
+			jobFailures.push({ commitSha: job.commitSha, error: safeErrorMessage(error) });
+			if (signal?.aborted) break;
 		}
 	}
 	const findingIssueFailures = service.store.listRetryableFindingIssues(service.profile.repositoryId)
@@ -307,7 +324,21 @@ export async function runRepositoryCycle(service, { signal } = {}) {
 	const findingIssuePending = service.store.listRetryableFindingIssues(service.profile.repositoryId)
 		.filter((publication) => publication.status === "pending")
 		.map(({ findingId, lifecycleStatus }) => ({ findingId, lifecycleStatus }));
-	return { ...pollResult, processed, failed, retriedFindingIssues, findingIssuePending, findingIssueFailures };
+	return { ...pollResult, processed, failed, deferred, jobFailures, retriedFindingIssues, findingIssuePending, findingIssueFailures };
+}
+
+function reviewRetryDelay(previousFailures) {
+	return Math.min(5 * 60_000 * 2 ** Math.min(previousFailures, 10), 6 * 60 * 60_000);
+}
+
+function safeErrorMessage(error) {
+	let message = error instanceof Error ? error.message : String(error);
+	for (const [name, value] of Object.entries(process.env)) {
+		if (/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/i.test(name) && value && value.length >= 4) {
+			message = message.replaceAll(value, "[redacted]");
+		}
+	}
+	return message.replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
 
 async function processJob(service, job, { signal } = {}) {
@@ -381,7 +412,7 @@ big-brother service render prints a foreground-watch service definition. Redirec
 the output to a launchd plist or systemd unit after reviewing its paths.
 `;
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
 	runCli(process.argv.slice(2)).catch((error) => {
 		console.error(`big-brother: ${error.message}`);
 		process.exitCode = 1;

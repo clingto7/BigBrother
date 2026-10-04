@@ -76,3 +76,20 @@ test("supervisor serializes review submissions for one repository", async () => 
   assert.deepEqual(events, ["start:commit-1", "finish:commit-1", "start:commit-2", "finish:commit-2"]);
   await supervisor.stop(handle);
 });
+
+test("supervisor cancellation stops an active runtime without waiting for its queue", async () => {
+	let rejectReview;
+	let stopped = false;
+	const runtime = {
+		reconcileReview() { return new Promise((_, reject) => { rejectReview = reject; }); },
+		async stop() { stopped = true; rejectReview?.(new Error("Prime RPC client stopped")); },
+	};
+	const supervisor = new PrimeRuntimeSupervisor({ runtimeFactory: { async start() { return runtime; } } });
+	const handle = await supervisor.start({ repositoryId: "acme/app" }, "/data/acme-app");
+	const activeReview = supervisor.reconcileReview(handle, {});
+	await new Promise((resolve) => setImmediate(resolve));
+	await supervisor.cancel(handle);
+	await assert.rejects(activeReview, /Prime RPC client stopped/);
+	assert.equal(stopped, true);
+	assert.throws(() => supervisor.reconcileReview(handle, {}), /unknown Prime runtime handle/);
+});

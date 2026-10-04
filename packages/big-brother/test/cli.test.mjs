@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildInteractivePrimeLaunchOptions, loadEnvFile, parseControlArgs, runCli, runWatch } from "../src/index.mjs";
+import { buildInteractivePrimeLaunchOptions, InMemoryJobStore, loadEnvFile, parseControlArgs, runCli, runRepositoryCycle, runWatch } from "../src/index.mjs";
+
+const execFileAsync = promisify(execFile);
 
 test("control CLI parses config, review, and watch options", () => {
   assert.deepEqual(parseControlArgs(["agent"]), {
@@ -76,6 +80,21 @@ test("control CLI validates an example configuration without starting Prime", as
   assert.match(output[0], /configuration valid/);
 });
 
+test("control CLI runs when its entry path has a symlinked parent", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "big-brother-cli-link-"));
+	try {
+		const alias = join(directory, "checkout");
+		await symlink(join(process.cwd(), "../.."), alias, "dir");
+		const { stdout } = await execFileAsync(process.execPath, [
+			join(alias, "packages/big-brother/src/cli.mjs"),
+			"config", "validate", "--config", join(alias, "config/big-brother.example.json"),
+		]);
+		assert.match(stdout, /configuration valid/);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
 test("service render command prints a platform service definition without starting watch", async () => {
   const output = [];
   const code = await runCli([
@@ -115,6 +134,33 @@ test("env file loads simple exports without executing shell code", async () => {
   }
 });
 
+test("CLI launcher asks Node to load the env file before startup", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "big-brother-launcher-"));
+	const fakeBin = join(directory, "bin");
+	const capturePath = join(directory, "args.txt");
+	const envFile = join(directory, "env");
+	const launcherPath = new URL("../../../bin/big-brother", import.meta.url).pathname;
+	await mkdir(fakeBin);
+	await writeFile(envFile, "NODE_USE_ENV_PROXY=1\nHTTPS_PROXY=http://127.0.0.1:7897\n");
+	await writeFile(join(fakeBin, "node"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\n", { mode: 0o755 });
+
+	try {
+		await execFileAsync("/bin/sh", [launcherPath, "watch", "--once"], {
+			env: {
+				...process.env,
+				PATH: `${fakeBin}:${process.env.PATH}`,
+				CAPTURE_ARGS: capturePath,
+				BIG_BROTHER_ENV_FILE: envFile,
+			},
+		});
+		const args = (await readFile(capturePath, "utf8")).trim().split("\n");
+		assert.deepEqual(args.slice(0, 2), ["--env-file", envFile]);
+		assert.match(args[2], /packages\/big-brother\/src\/cli\.mjs$/);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
 test("watch stops promptly when interrupted during the polling interval", async () => {
   let closed = false;
   const service = {
@@ -143,4 +189,52 @@ test("watch stops promptly when interrupted during the polling interval", async 
 
   assert.equal(closed, true);
   assert.ok(performance.now() - started < 500, "watch should not wait for the full polling interval after SIGINT");
+});
+
+test("watch logs actionable error details for failed review jobs", async () => {
+	const logs = [];
+	const job = { repositoryId: "acme/app", commitSha: "abc123", status: "queued" };
+	const service = {
+		profile: { repositoryId: "acme/app", trackedBranches: ["main"] },
+		store: {
+			getBranch: () => ({ cursorSha: "same" }),
+			listReviewJobs: () => [job],
+			listRetryableFindingIssues: () => [],
+			setReviewJobStatus() {},
+		},
+		readGithub: { async getBranchHead() { return { sha: "same" }; } },
+		publishGithub: {},
+		coordinator: { async process() { throw new Error("Prime RPC timed out"); } },
+		async close() {},
+	};
+	await runWatch(
+		{ repositories: [service.profile], pollIntervalMs: 1_000 },
+		{ once: true },
+		{ servicesFactory: () => service, stdout: () => {}, stderr: (line) => logs.push(line) },
+	);
+	assert.ok(logs.includes("acme/app@abc123: review failed: Prime RPC timed out"));
+});
+
+test("a failed review waits before another watch cycle calls the model", async () => {
+	const store = new InMemoryJobStore();
+	store.enrollBranch({ repositoryId: "acme/app", branchName: "main", headSha: "commit-1" });
+	store.admitCommitReview({ repositoryId: "acme/app", commitSha: "commit-2", branchName: "main" });
+	let attempts = 0;
+	const service = {
+		profile: { repositoryId: "acme/app", trackedBranches: ["main"] },
+		store,
+		readGithub: { async getBranchHead() { return { sha: "commit-1" }; } },
+		publishGithub: {},
+		coordinator: { async process() { attempts += 1; throw new Error("invalid review result"); } },
+	};
+	let clock = 1_000;
+	await runRepositoryCycle(service, { now: () => clock });
+	assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).nextRetryAt, clock + 300_000);
+	const deferred = await runRepositoryCycle(service, { now: () => clock });
+	assert.equal(attempts, 1);
+	assert.equal(deferred.deferred, 1);
+	clock += 300_000;
+	await runRepositoryCycle(service, { now: () => clock });
+	assert.equal(attempts, 2);
+	assert.equal(store.getReviewJob({ repositoryId: "acme/app", commitSha: "commit-2" }).nextRetryAt, clock + 600_000);
 });

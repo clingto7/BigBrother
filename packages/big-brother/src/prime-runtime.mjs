@@ -88,6 +88,15 @@ export class PrimeRuntimeSupervisor {
     }
   }
 
+  async cancel(handle) {
+    const entry = this.#entryFor(handle);
+    // Do not wait for the serialized request queue: its active request is what
+    // cancellation must interrupt.
+    this.#entries.delete(handle.repositoryId);
+    await entry.startPromise;
+    await entry.runtime.stop();
+  }
+
   async stopAll() {
     for (const entry of [...this.#entries.values()]) await this.stop(entry.handle);
   }

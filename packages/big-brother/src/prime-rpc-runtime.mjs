@@ -104,9 +104,11 @@ export class PrimeRpcRuntime {
 	}
 
 	async #prompt(message) {
+		const completionController = new AbortController();
 		const completion = this.#client.waitForEvent(
 			(event) => event?.type === "agent_end",
 			this.#timeoutMs,
+			{ signal: completionController.signal },
 		);
 		try {
 			await this.#client.send({
@@ -118,6 +120,7 @@ export class PrimeRpcRuntime {
 			// Keep a rejection handler attached if the prompt request fails before
 			// the event wait can finish.
 			completion.catch(() => undefined);
+			completionController.abort();
 			throw error;
 		}
 		const response = await this.#client.send({ type: "get_last_assistant_text" });
@@ -167,7 +170,11 @@ export function buildPrimeReconciliationPrompt({ reviewInput, workerResult, cano
 		"Independently check the worker evidence against the immutable ReviewInput and canonical context.",
 		"Only this pass may emit context_decisions or finding_issue_intents. Candidate facts remain proposals unless explicitly admitted, corrected, superseded, or retracted in context_decisions.",
 		"Every context_decisions fact_id for correct, supersede, or retract must identify an active fact from canonical context. If no matching active fact exists, do not emit that decision.",
+		"Every context_decisions entry must include evidence_refs: a non-empty array of IDs from top-level evidence. Do not substitute evidence objects or source metadata for evidence_refs.",
 		"Only explicitly actionable, evidence-backed findings may receive an active finding_issue_intents entry. Resolve an existing mapped finding only with { finding_id, action: \"resolve\" }.",
+		"Merge redundant or dependent findings into the primary finding; emit a separate finding only when it represents an independently actionable defect with distinct evidence or remediation.",
+		"Commit-message style or scope concerns belong in message_check and must not receive an issue intent unless they prove a repository-verifiable message-template violation or a concrete actionable defect.",
+		"Do not create issue intents for subjective wording, conventional-commit preferences, speculative concerns, or duplicate summaries of another finding.",
 		"Existing mapped finding issues are supplied below. Emit a resolve intent only when current evidence proves that mapped finding resolved; a clean review alone is not enough.",
 		"Use exactly these top-level keys: repository_id, commit_sha, parent_sha, observed_branches, conclusion, message_check, findings, policy_checks, evidence, limitations, candidate_facts, context_decisions, finding_issue_intents.",
 		"Do not use aliases such as verdict, summary, or checks; include empty arrays or objects when a section has no entries.",
@@ -200,19 +207,45 @@ export function parseReviewResult(text) {
 	const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
 	const candidate = fenced ? fenced[1].trim() : trimmed;
 	try {
-		return JSON.parse(candidate);
+		return normalizePrimeEvidenceRefs(JSON.parse(candidate));
 	} catch {
 		const firstObject = candidate.indexOf("{");
 		const lastObject = candidate.lastIndexOf("}");
 		if (firstObject !== -1 && lastObject > firstObject) {
 			try {
-				return JSON.parse(candidate.slice(firstObject, lastObject + 1));
+				return normalizePrimeEvidenceRefs(JSON.parse(candidate.slice(firstObject, lastObject + 1)));
 			} catch {
 				// Fall through with the original response for a useful error.
 			}
 		}
 		throw new Error("Prime review did not return valid JSON");
 	}
+}
+
+function normalizePrimeEvidenceRefs(result) {
+	if (!result || !Array.isArray(result.evidence) || !Array.isArray(result.context_decisions)) return result;
+	const evidenceById = new Map(result.evidence.map((item) => [item?.id, item]));
+	return {
+		...result,
+		context_decisions: result.context_decisions.map((decision) => {
+			if (!decision || "evidence_refs" in decision || !Array.isArray(decision.evidence) || decision.evidence.length === 0) return decision;
+			const matches = decision.evidence.every((item) => {
+				const canonical = evidenceById.get(item?.id);
+				return typeof item?.id === "string" &&
+					typeof item.source_path === "string" && item.source_path.length > 0 &&
+					typeof item.commit_basis === "string" && item.commit_basis.length > 0 &&
+					canonical?.source_path === item.source_path && sameCommitBasis(canonical?.commit_basis, item.commit_basis);
+			});
+			return matches ? { ...decision, evidence_refs: decision.evidence.map((item) => item.id) } : decision;
+		}),
+	};
+}
+
+function sameCommitBasis(left, right) {
+	if (left === right) return true;
+	const leftSha = typeof left === "string" ? left.match(/^[0-9a-f]{40}\b/)?.[0] : undefined;
+	const rightSha = typeof right === "string" ? right.match(/^[0-9a-f]{40}\b/)?.[0] : undefined;
+	return leftSha !== undefined && leftSha === rightSha;
 }
 
 class PrimeRpcClient {
@@ -248,6 +281,7 @@ class PrimeRpcClient {
 			const error = new Error(`Prime RPC exited (${code ?? signal ?? "unknown"})${this.#stderr ? `: ${this.#stderr.trim()}` : ""}`);
 			for (const pending of this.#pending.values()) pending.reject(error);
 			this.#pending.clear();
+			for (const listener of this.#eventListeners) listener.cancel(error);
 		});
 		await new Promise((resolveReady) => setTimeout(resolveReady, 100));
 		if (this.#process.exitCode !== null) throw new Error(`Prime RPC exited during startup: ${this.#process.exitCode}`);
@@ -262,19 +296,36 @@ class PrimeRpcClient {
 		});
 	}
 
-	waitForEvent(predicate, timeoutMs) {
+	waitForEvent(predicate, timeoutMs, { signal } = {}) {
 		return new Promise((resolveEvent, rejectEvent) => {
-			const timer = setTimeout(() => {
+			if (signal?.aborted) {
+				rejectEvent(new Error("Prime RPC event wait cancelled"));
+				return;
+			}
+			const cleanup = () => {
+				clearTimeout(timer);
 				this.#eventListeners.delete(listener);
+				signal?.removeEventListener("abort", onAbort);
+			};
+			const onAbort = () => {
+				cleanup();
+				rejectEvent(new Error("Prime RPC event wait cancelled"));
+			};
+			const timer = setTimeout(() => {
+				cleanup();
 				rejectEvent(new Error(`Timeout waiting for Prime RPC event${this.#stderr ? `: ${this.#stderr.trim()}` : ""}`));
 			}, timeoutMs);
 			const listener = (event) => {
 				if (!predicate(event)) return;
-				clearTimeout(timer);
-				this.#eventListeners.delete(listener);
+				cleanup();
 				resolveEvent(event);
 			};
+			listener.cancel = (error) => {
+				cleanup();
+				rejectEvent(error);
+			};
 			this.#eventListeners.add(listener);
+			signal?.addEventListener("abort", onAbort, { once: true });
 		});
 	}
 

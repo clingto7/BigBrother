@@ -33,15 +33,10 @@
 
 ## 0. 安装命令行入口
 
-在仓库根目录执行一次：
-
-```sh
-npm link ./packages/big-brother
-hash -r
-big-brother --help
-```
-
-如果 shell 找不到 `big-brother`，把 `npm prefix -g` 输出目录下的 `bin/` 加入 `PATH`，然后重新打开 shell。该 link 只注册当前仓库的本地 CLI，不会安装或升级 Prime、Pi 或 Sifu。
+按 [README](../README.md) 下载并校验 Release archive，运行其中的
+`scripts/install.sh`。脚本把 CLI 链接到 `$HOME/.local/bin/big-brother`；将
+`$HOME/.local/bin` 加入 `PATH`，然后运行 `big-brother --version`。开发 checkout
+也可直接运行 `sh scripts/install.sh`。
 
 安装 Tab 补全：
 
@@ -75,10 +70,12 @@ Prime runtime 已随项目放在 `runtime/`，不需要先重新构建 Prime。�
 复制示例：
 
 ```sh
-cp config/big-brother.example.json config/big-brother.json
+mkdir -p "$HOME/.config/big-brother"
+cp "$HOME/.local/share/big-brother/releases/big-brother-0.1.0-beta.1/config/big-brother.example.json" \
+  "$HOME/.config/big-brother/config.json"
 ```
 
-`config/big-brother.json` 已被 `.gitignore` 忽略。最小配置形状如下：
+配置保存在 release 目录之外。最小配置形状如下：
 
 ```json
 {
@@ -88,7 +85,8 @@ cp config/big-brother.example.json config/big-brother.json
       "repositoryId": "owner/repository",
       "cloneUrl": "git@github.com:owner/repository.git",
       "trackedBranches": ["main"],
-      "stateNamespace": ".big-brother/state/owner-repository",
+      "stateNamespace": "/home/USER/.local/state/big-brother/owner-repository",
+      "publishFindingIssues": true,
       "reviewFindingIssueLabels": ["big-brother"],
       "credentials": {
         "githubReadTokenEnv": "GITHUB_TOKEN",
@@ -107,7 +105,8 @@ cp config/big-brother.example.json config/big-brother.json
 - 新增到配置的 branch 第一次看到时只建立当前 head 作为 baseline，不自动回溯历史；
 - 同一个 commit 从多个 tracked branch 到达时只审查一次；
 - `stateNamespace` 必须对运行进程可读写，SQLite、session 和 workspace 都放在其下；
-- `reviewFindingIssueLabels` 是发布到 watched Repository 的 Review finding issue 标签；可以省略或设为空数组；
+- `publishFindingIssues` 默认 `true`；设为 `false` 时暂停 GitHub Issue 创建、更新、关闭和待处理请求的重试，但把 Prime 批准的请求保留在 SQLite，重新启用后补发；Commit Status 不受影响；
+- `reviewFindingIssueLabels` 是发布到 watched Repository 的 Review finding issue 标签；可以省略或设为空数组；空数组不会关闭 Issue 发布；
 - credential 字段写的是环境变量名，不是 token、私钥内容或 API key；
 - `cloneUrl` 使用 SSH 时，`gitSshKeyPathEnv` 指向私钥文件路径。CLI 会以 `GIT_SSH_COMMAND` 的方式显式使用它；也可以让运行进程使用已配置的 ssh-agent。
 - 配置文件不包含 provider、model 或模型 API key；这些属于 Prime agent 的运行时身份配置。
@@ -115,13 +114,7 @@ cp config/big-brother.example.json config/big-brother.json
 校验配置：
 
 ```sh
-big-brother config validate --config config/big-brother.json
-```
-
-完成命令注册后，也可以省略 `./bin/`：
-
-```sh
-big-brother config validate --config config/big-brother.json
+big-brother config validate --config "$HOME/.config/big-brother/config.json"
 ```
 
 ## 3. 配置 GitHub credential
@@ -140,15 +133,13 @@ CLI 每次启动时会自动读取 `~/.config/big-brother/env`（也可以用
 变量优先。可以把上面的三行放入该文件，并将权限设为 `600`；也可以继续在
 启动 watcher 前手动 `source` 它。
 
-`githubReadTokenEnv` 是 GitHub API 读取 branch head/commit range 的 token；公开仓库可以省略它。`githubStatusTokenEnv` 是现有发布 credential：它用于在目标 commit 上创建 advisory Commit Status，也用于在 watched Repository 创建 Prime 批准的 Review finding issue，因此需要 `Commit statuses: write` 和 `Issues: write`。它不需要 `Contents: write`，也不应拥有修改仓库内容的权限。
+`githubReadTokenEnv` 是 GitHub API 读取 branch head/commit range 的 token；公开仓库在功能上可以省略，但未认证 API 配额会按出口 IP 共享（通常每小时 60 次），长期 watcher 或共享出口环境仍应配置只读 token，避免其他用户耗尽配额。它与发布 credential 分开，通常只需目标仓库的 `Contents: read` 和默认的 `Metadata: read`。`githubStatusTokenEnv` 是现有发布 credential：它用于在目标 commit 上创建 advisory Commit Status，启用 `publishFindingIssues` 时也用于在 watched Repository 创建 Prime 批准的 Review finding issue，因此需要 `Commit statuses: write`，启用 Issue 发布时还需要 `Issues: write`。它不需要 `Contents: write`，也不应拥有修改仓库内容的权限。
 
 如果未来需要发布带丰富输出和 annotations 的 Check Run，再配置 GitHub App 的 `Checks: write`；GitHub 的 Checks 总览和具体 endpoint 对 PAT 支持存在不一致，当前 MVP 暂不依赖这条路径。
 
 `gitSshKeyPathEnv` 不是 API token，而是本机私钥文件的路径。私有仓库使用 SSH clone 时才需要它；对应的公钥需要添加到 GitHub 用户 SSH keys 或目标仓库 deploy keys。公钥上传到 GitHub，私钥只留在运行 Big Brother 的机器上。
 
 获取 read PAT 的路径是 GitHub 头像 → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token；选择目标仓库，在 Repository permissions 中只授予读取所需权限（通常是 `Contents: read`，并保留默认的 `Metadata: read`），生成后只复制一次并作为 `GITHUB_TOKEN` 注入。GitHub 官方建议 fine-grained token 只选择必要仓库和最小权限，详见 [管理 personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)。
-
-获取 GitHub App credential 的路径是 Settings → Developer settings → GitHub Apps → New GitHub App：为目标仓库安装 App，授予 `Checks: write` 和读取仓库所需权限，然后由 App 的 private key 换取 installation access token，作为 `GITHUB_CHECKS_TOKEN` 注入。这个 token 会过期，当前 MVP 尚未负责换取和刷新它。
 
 获取 SSH key 的最小步骤是：
 
@@ -160,9 +151,7 @@ ssh-keygen -t ed25519 -f "$HOME/.ssh/big-brother-github" -C "big-brother-github"
 
 不要把这些值写入仓库、配置 JSON、`.agents` 或 skill 目录。长期运行时应通过 launchd、systemd、容器 secret 或其他 secret manager 注入，而不是把 token 写进启动脚本。
 
-如果本机访问 Prime 需要 HTTP 代理，也要让 watcher 进程继承代理设置。Node
-运行 Prime 时至少需要 `NODE_USE_ENV_PROXY=1` 以及对应的
-`HTTPS_PROXY`/`HTTP_PROXY`；这些变量也可以放进上述 env 文件。
+如果运行机器访问 Prime 或 GitHub 需要 HTTP 代理，也要让 watcher 进程继承代理设置。将 `NODE_USE_ENV_PROXY=1` 与相应的 `HTTPS_PROXY`/`HTTP_PROXY` 放进上述 env 文件；Big Brother launcher 会在 Node 启动时安全加载该文件，使 Node 的原生代理支持及时生效（仅在启动后读取变量太晚）。该能力需要 Node.js `24.0.0+` 或 `22.21.0+`；`NO_PROXY` 可配置直连域名。代理必须是部署者授权且稳定的网络出口。
 
 首次排查建议确认 Git 本身能访问仓库：
 
@@ -174,10 +163,10 @@ git ls-remote git@github.com:owner/repository.git
 
 Big Brother 本身是一个独立的 Prime-derived agent；模型 provider、模型选择和
 OAuth/API key 由 Prime 自己保存，不由 Big Brother 的 repository config 管理。
-启动交互式 agent：
+启动交互式 agent（部署时建议显式指定持久化身份目录）：
 
 ```sh
-big-brother agent
+BIG_BROTHER_CODING_AGENT_DIR="$HOME/.local/share/big-brother/agent" big-brother agent
 ```
 
 在 Prime 界面中执行：
@@ -193,11 +182,16 @@ big-brother agent
 worker 会复用这套身份目录。不要在 `config/big-brother.json` 中添加
 `provider`、`model` 或 API key。
 
+注意：`bin/big-brother` 会在启动 CLI 前为该变量设置安装目录内的默认值，
+因此服务管理器应直接设置 `BIG_BROTHER_CODING_AGENT_DIR`（systemd 使用
+`Environment=BIG_BROTHER_CODING_AGENT_DIR=/absolute/path`），而不是只把它写进
+`BIG_BROTHER_ENV_FILE`；已存在的进程环境变量优先于 env 文件。
+
 ## 5. 先做一次单 commit 审查
 
 ```sh
 big-brother review \
-  --config config/big-brother.json \
+  --config "$HOME/.config/big-brother/config.json" \
   --repo owner/repository \
   --commit <40-character-commit-sha>
 ```
@@ -227,25 +221,28 @@ SQLite 会保留待重试请求。下一轮 cycle 会先用 stable finding ident
 
 ```sh
 big-brother watch \
-  --config config/big-brother.json \
+  --config "$HOME/.config/big-brother/config.json" \
   --once
 ```
 
 然后长期运行：
 
 ```sh
-big-brother watch --config config/big-brother.json
+big-brother watch --config "$HOME/.config/big-brother/config.json"
 ```
 
 也可以临时覆盖轮询间隔：
 
 ```sh
 big-brother watch \
-  --config config/big-brother.json \
+  --config "$HOME/.config/big-brother/config.json" \
   --interval-ms 30000
 ```
 
 首次 watch 只建立当前 branch head baseline，所以不会因为启动服务而自动审查整个历史。之后 branch 出现新 commit，poller 会沿 commit range 逐个建立 job。
+
+失败的 Review job 保留在 SQLite；watch 不会在下一轮立即重试。每次失败后的等待从 5 分钟起倍增，最长 6 小时，重启后仍生效；成功后清零。主动停止导致的取消不增加等待。`big-brother review --repo ... --commit ...` 是显式单次重试，可立即运行。旧数据库中的失败 job 升级后会先重试一次，再开始退避。
+每轮日志的 `review-deferred` 表示当前因退避尚未重试的 job 数量；它不计入本轮的 `failed`。
 
 按 `Ctrl-C` 或发送 `SIGTERM` 停止。重新启动时复用相同 `stateNamespace`，SQLite cursor 和未完成 job 会继续生效；不要为了“重置”而删除 state 目录，除非确认要丢弃审查进度。
 
@@ -255,6 +252,78 @@ big-brother watch \
 Issue 发布一定成功：Issues 权限或网络故障只会留下可重试的 publication work，
 下一轮或重启后的第一轮会先按 stable finding identity reconciliation，再继续创建、更新、关闭或重新打开同一个 issue。`big-brother/review`
 Commit Status 仍会独立发布。
+
+### 分离的监视服务器与被监视仓库
+
+Big Brother 不要求和目标仓库放在同一台机器。长期服务器只需要 Node.js、Git、
+Big Brother 安装目录、Prime 身份目录、运行配置/状态，以及访问 GitHub API、
+目标仓库 clone URL 和所选 Prime provider 的出站网络。目标仓库代码由 Big Brother
+按 commit SHA 拉取到自己的 state/workspace 目录；开发者可以从另一台机器正常
+push，watcher 下轮轮询就会发现该 commit。
+
+在长期运行的 Linux 用户账户中，先安装 Node.js `>=22.8.0`、Git 和 npm，并确认服务
+账户对 GitHub、Prime provider 均有出站访问。按 README 下载、校验、安装 Release
+archive。脚本将 CLI 链接到用户级 `$HOME/.local/bin`，并安装 Prime bundle 的两个
+外置依赖；不会创建凭据、登录模型或启用服务。服务定义应使用
+`$HOME/.local/bin/big-brother` 的绝对路径，以便升级和回退后自动指向当前版本。
+
+随仓库分发的 Prime `runtime/dist` 已构建，但 CLI 仍有两个外置 npm runtime
+依赖（`undici` 和 `@silvia-odwyer/photon-node`）。不要直接在 `runtime/` 执行
+`npm install`：该目录继承的源 workspace manifest 含未发布的 `@earendil-works/*`
+内部包版本。安装脚本会将外置依赖单独装到服务用户目录，再链接到 runtime；
+以下命令仅供手工排障：
+
+```sh
+runtime_deps="$HOME/.local/share/big-brother/runtime-deps/0.1.0-beta.1"
+mkdir -p "$runtime_deps"
+npm install --prefix "$runtime_deps" --no-save --no-package-lock --omit=dev \
+  "undici@7.29.0" "@silvia-odwyer/photon-node@0.3.4"
+mkdir -p runtime/node_modules/@silvia-odwyer
+ln -s "$runtime_deps/node_modules/undici" runtime/node_modules/undici
+ln -s "$runtime_deps/node_modules/@silvia-odwyer/photon-node" \
+  runtime/node_modules/@silvia-odwyer/photon-node
+```
+
+每个版本有独立的外置依赖目录；升级和回退后验证 `big-brother --version`
+及 `big-brother agent` 可启动。
+
+按前文配置 GitHub read/status credential 和 Prime `/login`、`/model`。推荐将
+`BIG_BROTHER_CODING_AGENT_DIR` 固定到服务账户家目录下的专用持久目录，并确保
+只有服务账户可读；不要把交互登录后的 agent 目录放在临时 home 或仓库里。
+之后为每个目标仓库创建配置，`stateNamespace` 用服务账户可写的绝对路径，
+例如 `/home/bb/.local/state/big-brother/yadig`。这里不需要预先 clone yadig：
+Big Brother 会自行按 SHA 创建 review workspace。目标是私有仓库时，仍需单独
+配置可用的 GitHub read credential 和 clone 身份（SSH deploy key 或已验证的
+Git credential helper）。
+
+配置完成先执行：
+
+```sh
+big-brother config validate --config /absolute/path/to/big-brother.json
+git ls-remote <configured-clone-url>
+big-brother watch --config /absolute/path/to/big-brother.json --once
+```
+
+`--once` 首次只建立 branch baseline。确认日志正常后，再按上面的 systemd user
+unit 流程启用长期 watcher。若 `watch` 账户退出后服务要继续运行，管理员需为该
+账户启用 systemd lingering；检查 `systemctl --user status big-brother-watch` 和
+`journalctl --user -u big-brother-watch`。更新版本时先停止 unit，安装并校验
+新 archive，重新运行对应安装脚本，再启动 unit；SQLite state 与 agent 身份目录
+不要随版本更新删除。
+
+### 真实推送验收
+
+端到端验收不需要把开发机上的工作仓库迁到服务器：先让服务器 watcher 对专用
+测试 branch 建立 baseline，再从开发机的干净 clone/worktree 推送一个新 commit。
+验证 watcher 发现的 SHA 与本机 push 的 SHA 相同、该 SHA 获得
+`big-brother/review` Commit Status，并核对对应 Review 结果/Review finding issue。
+验收时使用一次性 `bb-smoke/<日期>` branch，不要在 `main` 上制造测试提交；
+不要对用户已有的脏工作树做 checkout、reset 或清理。测试 branch 的保留/删除应
+在验收后明确决定。
+
+服务器无法访问 GitHub 或 Prime provider 时，先修复服务器的持久出站网络/代理配置，
+并让 systemd 服务显式继承对应代理变量；不要依赖开发机临时 SSH tunnel 作为长期
+监视服务的网络路径。验证网络时不要输出或记录 credential 值。
 
 ### Development issue 与 Review finding issue
 
@@ -277,9 +346,9 @@ macOS `launchd`（当前用户的 LaunchAgent）：
 ```sh
 mkdir -p "$HOME/Library/LaunchAgents"
 big-brother service render launchd \
-  --config /absolute/path/to/big-brother/config/big-brother.json \
-  --executable /absolute/path/to/big-brother/bin/big-brother \
-  --working-directory /absolute/path/to/big-brother \
+  --config "$HOME/.config/big-brother/config.json" \
+  --executable "$HOME/.local/bin/big-brother" \
+  --working-directory "$HOME" \
   --env-file "$HOME/.config/big-brother/env" \
   > "$HOME/Library/LaunchAgents/com.big-brother.watch.plist"
 plutil -lint "$HOME/Library/LaunchAgents/com.big-brother.watch.plist"
@@ -291,9 +360,9 @@ Linux `systemd`（当前用户的 user unit）：
 ```sh
 mkdir -p "$HOME/.config/systemd/user"
 big-brother service render systemd \
-  --config /absolute/path/to/big-brother/config/big-brother.json \
-  --executable /absolute/path/to/big-brother/bin/big-brother \
-  --working-directory /absolute/path/to/big-brother \
+  --config "$HOME/.config/big-brother/config.json" \
+  --executable "$HOME/.local/bin/big-brother" \
+  --working-directory "$HOME" \
   --env-file "$HOME/.config/big-brother/env" \
   > "$HOME/.config/systemd/user/big-brother-watch.service"
 systemctl --user daemon-reload
