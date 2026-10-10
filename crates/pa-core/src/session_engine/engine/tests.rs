@@ -133,6 +133,62 @@ async fn engine_runs_tool_loop_and_persists() {
     let _ = ToolDefinitionBridge::new;
 }
 
+#[tokio::test]
+async fn review_session_runs_only_its_supplied_tool() {
+    let model = pa_agent::types::Model {
+        id: "m".into(),
+        name: "m".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 1_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    provider.push_tool_call_turn(
+        None,
+        vec![("call-1", "echo", serde_json::json!({"text": "hi"}))],
+    );
+    provider.push_text_turn("done");
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = create_review_session(SessionEngineConfig {
+        cwd: tmp.path().to_path_buf(),
+        agent_dir: tmp.path().join("agent"),
+        model: Some(model),
+        stream_fn: Some(provider.stream_fn()),
+        tools: vec![bridge_tool(echo_definition())],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let names: Vec<String> = engine
+        .session
+        .agent()
+        .state()
+        .await
+        .tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    assert_eq!(names, vec!["echo"]);
+    assert!(engine
+        .system_prompt
+        .contains("This session has no Python REPL"));
+    engine
+        .prompt("read evidence", PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let state = engine.session.agent().state().await;
+    assert!(state.messages.iter().any(|message| matches!(message,
+        pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(result))
+            if result.tool_name == "echo"
+    )));
+}
+
 /// A spawned child's prompt stamps its recursion depth: `create_session`
 /// at depth N reads "depth: N (not root)", never the root identity.
 #[tokio::test]
