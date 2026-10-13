@@ -269,7 +269,6 @@ async fn restricted_main_agent_dispatches_fixed_range_review_children() {
                         "layer": layer,
                         "baseSha": "base-123",
                         "headSha": "head-456",
-                        "model": format!("provider/{layer}"),
                     }),
                 )
             })
@@ -287,6 +286,12 @@ async fn restricted_main_agent_dispatches_fixed_range_review_children() {
         fallback: NoRlmChildren::new(fallback_session),
     });
     let tool_host = Arc::clone(&host);
+    // The dispatch configuration, not the model's tool arguments, picks
+    // each layer's reviewer model (ADR 0019).
+    let layer_models: std::collections::HashMap<String, String> = layers
+        .iter()
+        .map(|layer| ((*layer).to_string(), format!("provider/{layer}")))
+        .collect();
     let tool = ToolDefinition {
         name: "dispatch_review".into(),
         label: "Dispatch review".into(),
@@ -297,15 +302,15 @@ async fn restricted_main_agent_dispatches_fixed_range_review_children() {
             "properties": {
                 "layer": {"type": "string"},
                 "baseSha": {"type": "string"},
-                "headSha": {"type": "string"},
-                "model": {"type": "string"}
+                "headSha": {"type": "string"}
             },
-            "required": ["layer", "baseSha", "headSha", "model"]
+            "required": ["layer", "baseSha", "headSha"]
         }),
         execution_mode: Some(ExecutionMode::Sequential),
         prepare_arguments: None,
         execute: Arc::new(move |_id, params, _signal, _on_update| {
             let host = Arc::clone(&tool_host);
+            let layer_models = layer_models.clone();
             Box::pin(async move {
                 let field = |key: &str| -> anyhow::Result<String> {
                     Ok(params
@@ -317,12 +322,14 @@ async fn restricted_main_agent_dispatches_fixed_range_review_children() {
                 let layer = field("layer")?;
                 let base = field("baseSha")?;
                 let head = field("headSha")?;
-                let model = field("model")?;
+                let Some(model) = layer_models.get(&layer) else {
+                    anyhow::bail!("unknown review layer \"{layer}\"");
+                };
                 let handle = host
                     .spawn(RlmSpawnRequest {
                         prompt: format!("Review {layer} for {base}..{head}"),
                         name: Some(layer),
-                        model: Some(model),
+                        model: Some(model.clone()),
                         thinking: None,
                         spawned_by_request_id: None,
                         cell_source_code: None,

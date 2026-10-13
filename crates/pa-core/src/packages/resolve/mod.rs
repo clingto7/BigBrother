@@ -10,6 +10,10 @@ pub(crate) mod discovery;
 pub(crate) mod manager;
 pub(crate) mod patterns;
 
+/// The nearest git repository root from a starting directory (the
+/// `.git`-ancestor walk shared by skill discovery and product callers).
+pub use discovery::find_git_repo_root;
+
 #[cfg(test)]
 pub(crate) mod tests;
 

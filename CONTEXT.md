@@ -79,6 +79,15 @@ The bounded set of questions a review is expected to answer. The initial
 scope spans verifiable requirements, fit with project rules and direction,
 and implementation quality, with conclusions tied to evidence.
 
+### Review profile
+
+Big Brother's per-repository configuration for review: the stable wake
+name of the repository's main review session, its creation model, and the
+layer-to-model assignments. It is operator-owned, stored under Big
+Brother's agent-side state keyed by the repository's local git root, and
+never inside the watched work tree, so reviewed content cannot edit the
+reviewer's operating rules.
+
 ### Project policy
 
 The repository's documented requirements for how changes should be made. It is

@@ -246,13 +246,32 @@ impl Supervisor {
         // header depth rides `config.rlmDepth`, the key launch_worker
         // copies into the DURABLE create command's rest where the
         // passivation fence reads it.
+        //
+        // The wake create carries no create-config flags — the session file
+        // restores the model, and the review marker re-derives from the
+        // repository profile: a wake by the profile's session name is a
+        // review main session again (ADR 0023/0024). An id-prefix wake
+        // deliberately stays a normal session; the name is the stable wake
+        // identity. A present-but-broken profile fails the wake loudly
+        // rather than downgrading the tool boundary.
+        let mut wake_config = json!({ "cwd": info.cwd, "rlmDepth": info.rlm_depth });
+        match crate::big_brother::profile::resolve_profile(
+            &self.options.agent_dir,
+            std::path::Path::new(&info.cwd),
+        ) {
+            Ok(Some(profile)) if profile.session_name == selector => {
+                wake_config["bigBrotherReview"] = Value::Bool(true);
+            }
+            Ok(_) => {}
+            Err(error) => return WakeOutcome::Failed(format!("review profile: {error}")),
+        }
         let create = DaemonCommand::Create {
             id: None,
             session_path: Some(session_path.clone()),
             continue_recent: Some(false),
             no_session: None,
             name: None,
-            config: Some(json!({ "cwd": info.cwd, "rlmDepth": info.rlm_depth })),
+            config: Some(wake_config),
             // Telemetry opt-out only ever rides an explicit user create;
             // the wake create inherits the daemon default (absent).
             telemetry_disabled: None,

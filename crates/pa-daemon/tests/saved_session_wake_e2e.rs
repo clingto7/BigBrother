@@ -176,8 +176,7 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
                                 "arguments": json!({
                                     "layer": layer,
                                     "baseSha": base,
-                                    "headSha": head,
-                                    "model": format!("prime-inference/{layer}")
+                                    "headSha": head
                                 }).to_string()
                             }
                         })
@@ -215,20 +214,16 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
 
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
-    spawn_daemon_with_profile(socket, agent_dir, false)
-}
-
-#[allow(clippy::zombie_processes)]
-fn spawn_daemon_with_profile(socket: &Path, agent_dir: &Path, review_profile: bool) -> Daemon {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pa-daemon"));
-    command
+    let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
         .arg("supervisor")
         .arg("--socket")
         .arg(socket)
         .arg("--agent-dir")
         .arg(agent_dir)
-        // The woken worker has no create-config model: it falls back to the
-        // process pair (like the TS daemon's default session config).
+        // The daemon's env pair is the spawn fallback a woken worker must
+        // not prefer over its session file's pinned model: mock-1 differs
+        // from every review profile model here on purpose, so a model
+        // restoration regression fails the review flow loudly.
         .env("PRIME_AGENT_MODEL_PROVIDER", "prime-inference")
         .env("PRIME_AGENT_MODEL", "mock-1")
         .stdout(Stdio::null())
@@ -239,13 +234,9 @@ fn spawn_daemon_with_profile(socket: &Path, agent_dir: &Path, review_profile: bo
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
-        );
-    if review_profile {
-        command
-            .env("PA_REVIEW_SPIKE_PROFILE", "1")
-            .env("PRIME_AGENT_MODEL", "main");
-    }
-    let child = command.spawn().expect("spawn pa-daemon supervisor");
+        )
+        .spawn()
+        .expect("spawn pa-daemon supervisor");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -375,6 +366,52 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .to_string()
 }
 
+/// The profile-side slug of a watched repo's git root — the test-side
+/// mirror of the product's slug rule (the integration test cannot reach
+/// the crate-private module).
+fn profile_repo_slug(repo: &Path) -> String {
+    let mut slug = String::new();
+    let mut in_separator_run = false;
+    for character in repo.to_string_lossy().chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            in_separator_run = false;
+        } else if !in_separator_run {
+            slug.push('-');
+            in_separator_run = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// Write the repository's review profile (ADR 0024) under the agent dir:
+/// the wake name, the main model, and the three layer models. Stored
+/// outside the work tree on purpose — reviewed content must not edit the
+/// reviewer's operating rules.
+fn write_review_profile(agent_dir: &Path, repo: &Path) {
+    let path = agent_dir
+        .join("big-brother")
+        .join("profiles")
+        .join(profile_repo_slug(repo))
+        .join("profile.json");
+    std::fs::create_dir_all(path.parent().expect("profile dir")).expect("profile dir");
+    std::fs::write(
+        &path,
+        json!({
+            "version": 1,
+            "sessionName": "review-main",
+            "mainModel": "prime-inference/main",
+            "layers": [
+                { "name": "requirements", "model": "prime-inference/requirements" },
+                { "name": "project-fit", "model": "prime-inference/project-fit" },
+                { "name": "implementation", "model": "prime-inference/implementation" }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("review profile");
+}
+
 #[test]
 fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -413,15 +450,16 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     .expect("models.json");
     let cursor = dir.path().join("cursor");
     std::fs::write(&cursor, &base).expect("initial observer cursor");
+    write_review_profile(&agent_dir, &repo);
     let socket = dir.path().join("daemon.sock");
-    let daemon = spawn_daemon_with_profile(&socket, &agent_dir, true);
+    let daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _) = Client::connect(&socket);
     client.send_command(
         "create",
         &json!({
             "type": "create", "name": "review-main",
             "config": { "cwd": repo, "sessionDir": sessions,
-                "provider": "prime-inference", "model": "main" }
+                "bigBrotherReview": true }
         }),
     );
     let created = client.read_response("create");
@@ -453,7 +491,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     let head = git(&repo, &["rev-parse", "HEAD"]);
     assert_ne!(base, head);
 
-    let restarted = spawn_daemon_with_profile(&socket, &agent_dir, true);
+    let restarted = spawn_daemon(&socket, &agent_dir);
     let (mut client, _) = Client::connect(&socket);
     client.send_command("list", &json!({ "type": "list" }));
     assert_eq!(
@@ -488,6 +526,26 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         !parent_messages.contains("Unknown tool"),
         "{parent_messages}"
     );
+
+    // The cold-wake model restoration (ADR 0023): the woken main session
+    // runs on the model its file pins — the profile's main model, seeded
+    // at creation — never the daemon's env fallback (mock-1). The
+    // discriminating mock would have answered plain text on mock-1 and
+    // never dispatched, so the flow above already proves it; the roster
+    // row pins the fact explicitly.
+    client.send_command("woken-roster", &json!({ "type": "list" }));
+    let roster = client.read_response("woken-roster");
+    let woken_model = roster["data"]["sessions"]
+        .as_array()
+        .expect("roster sessions")
+        .iter()
+        .find(|row| row["sessionName"] == "review-main")
+        .expect("woken review-main on the roster")
+        .get("model")
+        .cloned()
+        .expect("woken model");
+    assert_eq!(woken_model["provider"], "prime-inference");
+    assert_eq!(woken_model["id"], "main");
 
     let layers = ["requirements", "project-fit", "implementation"];
     let child_summaries = wait_until(Duration::from_secs(90), || {
@@ -543,7 +601,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     drop(client);
     drop(restarted);
     std::fs::remove_file(&socket).ok();
-    let _second_restart = spawn_daemon_with_profile(&socket, &agent_dir, true);
+    let _second_restart = spawn_daemon(&socket, &agent_dir);
     let (mut client, _) = Client::connect(&socket);
     client.send_command("after-result-restart", &json!({ "type": "list" }));
     assert_eq!(
