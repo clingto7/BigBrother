@@ -241,7 +241,7 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
 }
 
 #[test]
-fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
+fn send_to_a_saved_session_after_daemon_restart_wakes_it_and_runs_the_turn() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions = agent_dir.join("sessions");
@@ -271,7 +271,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     )
     .expect("write models.json");
     let socket = dir.path().join("daemon.sock");
-    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
@@ -343,6 +343,18 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     };
     assert_eq!(saved_rows.len(), 1, "the killed session is saved");
     assert_eq!(saved_rows[0]["name"], "alpha");
+
+    // Simulate a machine restart: the monitor can address the saved session
+    // after a new daemon starts, without retaining the old active worker id.
+    drop(client);
+    drop(daemon);
+    std::fs::remove_file(&socket).ok();
+    let _restarted_daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    client.send_command("l-restart", &json!({ "type": "list" }));
+    let list = client.read_response("l-restart");
+    assert_eq!(list["data"]["sessions"].as_array().map(Vec::len), Some(0));
 
     client.send_command(
         "s1",

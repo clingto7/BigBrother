@@ -2,6 +2,11 @@
 //! stamp, the MCP-gating unlock, and the goal/heartbeat handler
 //! registration.
 use super::*;
+use crate::session_engine::rlm_host::{
+    NoRlmChildren, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
+    RlmSubagentHost,
+};
 use crate::session_engine::tool_bridge::{bridge_tool, ToolDefinitionBridge};
 use crate::tools::tool_definition::{ExecutionMode, ToolDefinition, ToolExecutionResult};
 use pa_agent::scripted::ScriptedProvider;
@@ -187,6 +192,185 @@ async fn review_session_runs_only_its_supplied_tool() {
         pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(result))
             if result.tool_name == "echo"
     )));
+}
+
+struct RecordingReviewHost {
+    requests: Arc<tokio::sync::Mutex<Vec<RlmSpawnRequest>>>,
+    fallback: NoRlmChildren,
+}
+
+impl RlmSubagentHost for RecordingReviewHost {
+    fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle> {
+        let requests = Arc::clone(&self.requests);
+        Box::pin(async move {
+            let name = request.name.clone().unwrap_or_else(|| "review".into());
+            let model = request.model.clone().unwrap_or_default();
+            requests.lock().await.push(request);
+            Ok(RlmSpawnHandle {
+                rlm_child_id: format!("sub-{name}"),
+                name,
+                session_dir: "/tmp/spike-child".into(),
+                model,
+            })
+        })
+    }
+
+    fn create_session(
+        &self,
+        request: RlmCreateSessionRequest,
+    ) -> RlmHostFuture<RlmCreateSessionHandle> {
+        self.fallback.create_session(request)
+    }
+
+    fn list_subagents(&self) -> RlmHostFuture<Vec<RlmSubagentEntry>> {
+        self.fallback.list_subagents()
+    }
+
+    fn delete_subagent(&self, target: String) -> RlmHostFuture<RlmDeleteSubagentResult> {
+        self.fallback.delete_subagent(target)
+    }
+
+    fn collect(&self, targets: Vec<String>, timeout_ms: u64) -> RlmHostFuture<Vec<RlmChildResult>> {
+        self.fallback.collect(targets, timeout_ms)
+    }
+
+    fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String> {
+        self.fallback.rename(name, session_id)
+    }
+}
+
+#[tokio::test]
+async fn restricted_main_agent_dispatches_fixed_range_review_children() {
+    let model = pa_agent::types::Model {
+        id: "main".into(),
+        name: "main".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 1_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    let layers = ["requirements", "project-fit", "implementation"];
+    let call_ids = ["call-1", "call-2", "call-3"];
+    provider.push_tool_call_turn(
+        None,
+        layers
+            .iter()
+            .zip(call_ids)
+            .map(|(layer, call_id)| {
+                (
+                    call_id,
+                    "dispatch_review",
+                    serde_json::json!({
+                        "layer": layer,
+                        "baseSha": "base-123",
+                        "headSha": "head-456",
+                        "model": format!("provider/{layer}"),
+                    }),
+                )
+            })
+            .collect(),
+    );
+    provider.push_text_turn("reviews dispatched");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let fallback_session = Arc::new(tokio::sync::Mutex::new(SessionManager::in_memory(
+        tmp.path(),
+    )));
+    let host: Arc<dyn RlmSubagentHost> = Arc::new(RecordingReviewHost {
+        requests: Arc::clone(&requests),
+        fallback: NoRlmChildren::new(fallback_session),
+    });
+    let tool_host = Arc::clone(&host);
+    let tool = ToolDefinition {
+        name: "dispatch_review".into(),
+        label: "Dispatch review".into(),
+        description: "Review one fixed range in one layer".into(),
+        prompt_snippet: String::new(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "layer": {"type": "string"},
+                "baseSha": {"type": "string"},
+                "headSha": {"type": "string"},
+                "model": {"type": "string"}
+            },
+            "required": ["layer", "baseSha", "headSha", "model"]
+        }),
+        execution_mode: Some(ExecutionMode::Sequential),
+        prepare_arguments: None,
+        execute: Arc::new(move |_id, params, _signal, _on_update| {
+            let host = Arc::clone(&tool_host);
+            Box::pin(async move {
+                let field = |key: &str| -> anyhow::Result<String> {
+                    Ok(params
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| anyhow::anyhow!("missing {key}"))?
+                        .to_string())
+                };
+                let layer = field("layer")?;
+                let base = field("baseSha")?;
+                let head = field("headSha")?;
+                let model = field("model")?;
+                let handle = host
+                    .spawn(RlmSpawnRequest {
+                        prompt: format!("Review {layer} for {base}..{head}"),
+                        name: Some(layer),
+                        model: Some(model),
+                        thinking: None,
+                        spawned_by_request_id: None,
+                        cell_source_code: None,
+                    })
+                    .await?;
+                Ok(ToolExecutionResult::text(handle.rlm_child_id))
+            })
+        }),
+    };
+    let engine = create_review_session(SessionEngineConfig {
+        cwd: tmp.path().to_path_buf(),
+        agent_dir: tmp.path().join("agent"),
+        model: Some(model),
+        stream_fn: Some(provider.stream_fn()),
+        tools: vec![bridge_tool(tool)],
+        rlm_subagent_host: Some(host),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let names: Vec<String> = engine
+        .session
+        .agent()
+        .state()
+        .await
+        .tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    assert_eq!(names, vec!["dispatch_review"]);
+    engine
+        .prompt("review base-123..head-456", PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let recorded = requests.lock().await;
+    assert_eq!(recorded.len(), 3);
+    for (request, layer) in recorded.iter().zip(layers) {
+        assert_eq!(request.name.as_deref(), Some(layer));
+        assert_eq!(
+            request.model.as_deref(),
+            Some(format!("provider/{layer}").as_str())
+        );
+        assert_eq!(
+            request.prompt,
+            format!("Review {layer} for base-123..head-456")
+        );
+    }
 }
 
 /// A spawned child's prompt stamps its recursion depth: `create_session`
