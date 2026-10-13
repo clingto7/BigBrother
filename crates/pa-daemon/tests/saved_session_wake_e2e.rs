@@ -29,6 +29,8 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -110,9 +112,116 @@ fn serve(mut stream: TcpStream, answer: &str) -> std::io::Result<()> {
     )
 }
 
+fn spawn_review_mock(main_calls: Arc<AtomicUsize>) -> PathBuf {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind review mock");
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let calls = Arc::clone(&main_calls);
+            std::thread::spawn(move || {
+                let _ = serve_review(stream, &calls);
+            });
+        }
+    });
+    PathBuf::from(url)
+}
+
+fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = value.trim().parse().unwrap_or_default();
+        }
+    }
+    let mut body = vec![0; content_length];
+    reader.read_exact(&mut body)?;
+    let request: Value = serde_json::from_slice(&body).map_err(std::io::Error::other)?;
+    let model = request["model"].as_str().unwrap_or_default();
+    let data = if model == "main" {
+        match main_calls.fetch_add(1, Ordering::SeqCst) {
+            0 => vec![
+                chunk(&json!({"role": "assistant", "content": "ready"}), None),
+                chunk(&json!({}), Some("stop")),
+            ],
+            1 => {
+                let request_text = request.to_string();
+                let (base, head) = request_text
+                    .split_once("REVIEW_RANGE ")
+                    .and_then(|(_, suffix)| suffix.split_once(" END"))
+                    .and_then(|(range, _)| range.split_once(".."))
+                    .expect("wake request contains fixed range");
+                let layers = ["requirements", "project-fit", "implementation"];
+                let calls: Vec<Value> = layers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, layer)| {
+                        json!({
+                            "index": index,
+                            "id": format!("call-review-{index}"),
+                            "type": "function",
+                            "function": {
+                                "name": "dispatch_review",
+                                "arguments": json!({
+                                    "layer": layer,
+                                    "baseSha": base,
+                                    "headSha": head,
+                                    "model": format!("prime-inference/{layer}")
+                                }).to_string()
+                            }
+                        })
+                    })
+                    .collect();
+                vec![
+                    chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
+                    chunk(&json!({}), Some("tool_calls")),
+                ]
+            }
+            _ => vec![
+                chunk(
+                    &json!({"role": "assistant", "content": "review dispatched"}),
+                    None,
+                ),
+                chunk(&json!({}), Some("stop")),
+            ],
+        }
+    } else {
+        vec![
+            chunk(
+                &json!({"role": "assistant", "content": format!("{model} reviewed")}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ]
+    };
+    let mut payload = String::new();
+    for part in data {
+        write!(payload, "data: {part}\n\n").expect("SSE chunk");
+    }
+    payload.push_str("data: [DONE]\n\n");
+    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}").as_bytes())
+}
+
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
-    let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+    spawn_daemon_with_profile(socket, agent_dir, false)
+}
+
+#[allow(clippy::zombie_processes)]
+fn spawn_daemon_with_profile(socket: &Path, agent_dir: &Path, review_profile: bool) -> Daemon {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pa-daemon"));
+    command
         .arg("supervisor")
         .arg("--socket")
         .arg(socket)
@@ -130,9 +239,13 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
-        )
-        .spawn()
-        .expect("spawn pa-daemon supervisor");
+        );
+    if review_profile {
+        command
+            .env("PA_REVIEW_SPIKE_PROFILE", "1")
+            .env("PRIME_AGENT_MODEL", "main");
+    }
+    let child = command.spawn().expect("spawn pa-daemon supervisor");
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if socket.exists() {
@@ -238,6 +351,211 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     let response = client.read_response(id);
     assert_eq!(response["success"], true, "get_messages failed: {response}");
     serde_json::to_string(&response["data"]).expect("messages json")
+}
+
+fn git(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Review Test")
+        .env("GIT_AUTHOR_EMAIL", "review@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Review Test")
+        .env("GIT_COMMITTER_EMAIL", "review@example.invalid")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git UTF-8")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("code.txt"), "baseline\n").expect("baseline file");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "baseline"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+
+    let agent_dir = dir.path().join("agent");
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let url = spawn_review_mock(Arc::clone(&main_calls));
+    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id": id, "name": id, "api": "openai-completions",
+                "contextWindow": 128_000, "maxTokens": 4096
+            })
+        })
+        .collect();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": { "prime-inference": {
+                "api": "openai-completions", "baseUrl": url.to_string_lossy(),
+                "apiKey": "sk-review-test", "models": models
+            }}
+        })
+        .to_string(),
+    )
+    .expect("models.json");
+    let cursor = dir.path().join("cursor");
+    std::fs::write(&cursor, &base).expect("initial observer cursor");
+    let socket = dir.path().join("daemon.sock");
+    let daemon = spawn_daemon_with_profile(&socket, &agent_dir, true);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command(
+        "create",
+        &json!({
+            "type": "create", "name": "review-main",
+            "config": { "cwd": repo, "sessionDir": sessions,
+                "provider": "prime-inference", "model": "main" }
+        }),
+    );
+    let created = client.read_response("create");
+    assert_eq!(created["success"], true, "{created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active id")
+        .to_string();
+    client.send_command(
+        "bootstrap",
+        &json!({
+            "type": "prompt_and_wait", "activeSessionId": active_id, "message": "bootstrap"
+        }),
+    );
+    assert_eq!(client.read_response("bootstrap")["success"], true);
+    client.send_command(
+        "kill",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    assert_eq!(client.read_response("kill")["success"], true);
+    drop(client);
+    drop(daemon);
+    std::fs::remove_file(&socket).ok();
+
+    std::fs::write(repo.join("code.txt"), "changed\n").expect("new content");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "change"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(base, head);
+
+    let restarted = spawn_daemon_with_profile(&socket, &agent_dir, true);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command("list", &json!({ "type": "list" }));
+    assert_eq!(
+        client.read_response("list")["data"]["sessions"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    let stored_base = std::fs::read_to_string(&cursor).expect("restore cursor");
+    let observed_head = git(&repo, &["rev-parse", "HEAD"]);
+    assert_eq!(stored_base, base);
+    assert_eq!(observed_head, head);
+    client.send_command(
+        "wake",
+        &json!({
+            "type": "send_message", "targetActiveSessionId": "review-main",
+            "message": format!("REVIEW_RANGE {stored_base}..{observed_head} END")
+        }),
+    );
+    let wake = client.read_response("wake");
+    assert_eq!(wake["success"], true, "{wake}");
+    let woken_id = wake["data"]["target"]["activeSessionId"]
+        .as_str()
+        .expect("woken id");
+    assert_ne!(woken_id, active_id);
+    let parent_messages = wait_until(Duration::from_secs(90), || {
+        let text = messages(&mut client, "parent-messages", woken_id);
+        (text.contains("review dispatched") && text.matches("dispatch_review").count() >= 3)
+            .then_some(text)
+    });
+    assert!(
+        !parent_messages.contains("Unknown tool"),
+        "{parent_messages}"
+    );
+
+    let layers = ["requirements", "project-fit", "implementation"];
+    let child_summaries = wait_until(Duration::from_secs(90), || {
+        client.send_command("children", &json!({ "type": "list" }));
+        let response = client.read_response("children");
+        let sessions = response["data"]["sessions"].as_array()?;
+        let children: Vec<Value> = sessions
+            .iter()
+            .filter(|row| layers.iter().any(|layer| row["sessionName"] == *layer))
+            .cloned()
+            .collect();
+        (children.len() == 3).then_some(children)
+    });
+    let mut results = Vec::new();
+    for layer in layers {
+        let child = child_summaries
+            .iter()
+            .find(|row| row["sessionName"] == layer)
+            .expect("child");
+        assert_eq!(child["model"]["provider"], "prime-inference");
+        assert_eq!(child["model"]["id"], layer);
+        let child_id = child["id"]
+            .as_str()
+            .or_else(|| child["activeSessionId"].as_str())
+            .expect("child id");
+        let answer = wait_until(Duration::from_secs(90), || {
+            let text = messages(&mut client, "child-messages", child_id);
+            text.contains(&format!("{layer} reviewed")).then_some(text)
+        });
+        assert!(
+            answer.contains(&format!("Review {layer} for {base}..{head}")),
+            "{answer}"
+        );
+        results.push(json!({ "layer": layer, "model": format!("prime-inference/{layer}"), "base": base, "head": head }));
+    }
+    let record = dir.path().join("review-record.json");
+    std::fs::write(
+        &record,
+        json!({ "base": base, "head": head, "results": results }).to_string(),
+    )
+    .expect("persist observed results");
+    std::fs::write(&cursor, &head).expect("advance cursor after results");
+    assert_eq!(std::fs::read_to_string(&cursor).unwrap(), head);
+    assert_eq!(
+        serde_json::from_str::<Value>(&std::fs::read_to_string(&record).unwrap()).unwrap()
+            ["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(main_calls.load(Ordering::SeqCst), 3);
+    drop(client);
+    drop(restarted);
+    std::fs::remove_file(&socket).ok();
+    let _second_restart = spawn_daemon_with_profile(&socket, &agent_dir, true);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command("after-result-restart", &json!({ "type": "list" }));
+    assert_eq!(
+        client.read_response("after-result-restart")["success"],
+        true
+    );
+    // The observer's durable cursor prevents a second wake for the same head.
+    assert_eq!(
+        git(&repo, &["rev-parse", "HEAD"]),
+        std::fs::read_to_string(&cursor).unwrap()
+    );
+    assert_eq!(main_calls.load(Ordering::SeqCst), 3);
 }
 
 #[test]

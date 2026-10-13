@@ -15,6 +15,61 @@ use super::{
 /// the user wants first, never an imperative to execute.
 pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
 
+// Feasibility spike only: exercise a restricted daemon session with real
+// supervisor-backed children. The product will select profiles per repository.
+fn review_spike_tool(
+    children: Arc<SupervisorChildSessions>,
+) -> Arc<dyn pa_agent::types::AgentTool> {
+    use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
+    use pa_core::session_engine::tool_bridge::bridge_tool;
+    use pa_core::{ExecutionMode, ToolDefinition, ToolExecutionResult};
+
+    bridge_tool(ToolDefinition {
+        name: "dispatch_review".into(),
+        label: "Dispatch review".into(),
+        description: "Dispatch one review layer for an immutable range".into(),
+        prompt_snippet: String::new(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "layer": { "type": "string" },
+                "baseSha": { "type": "string" },
+                "headSha": { "type": "string" },
+                "model": { "type": "string" }
+            },
+            "required": ["layer", "baseSha", "headSha", "model"]
+        }),
+        execution_mode: Some(ExecutionMode::Sequential),
+        prepare_arguments: None,
+        execute: Arc::new(move |_id, params, _signal, _on_update| {
+            let children = Arc::clone(&children);
+            Box::pin(async move {
+                let field = |key: &str| -> anyhow::Result<&str> {
+                    params
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow::anyhow!("missing {key}"))
+                };
+                let layer = field("layer")?.to_string();
+                let base = field("baseSha")?.to_string();
+                let head = field("headSha")?.to_string();
+                let model = field("model")?.to_string();
+                let handle = children
+                    .spawn(RlmSpawnRequest {
+                        prompt: format!("Review {layer} for {base}..{head}"),
+                        name: Some(layer),
+                        model: Some(model),
+                        thinking: None,
+                        spawned_by_request_id: None,
+                        cell_source_code: None,
+                    })
+                    .await?;
+                Ok(ToolExecutionResult::text(handle.rlm_child_id))
+            })
+        }),
+    })
+}
+
 impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
     /// (create config), the supervisor link, the children registry, and the
@@ -932,7 +987,18 @@ impl AgentSessionEngine {
             .lock()
             .expect("late agent message sink lock")
             .clone();
-        pa_core::session_engine::engine::create_session(SessionEngineConfig {
+        let review_spike = std::env::var_os("PA_REVIEW_SPIKE_PROFILE").is_some()
+            && self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed) == 0;
+        let review_tools = if review_spike {
+            self.children
+                .iter()
+                .cloned()
+                .map(review_spike_tool)
+                .collect()
+        } else {
+            vec![]
+        };
+        let session_config = SessionEngineConfig {
             on_late_sent_agent_message,
             semantic_edges,
             telemetry,
@@ -945,8 +1011,8 @@ impl AgentSessionEngine {
             model: Some(agent_model),
             thinking_level: Some(map_thinking_level(self.effective_thinking())),
             stream_fn: Some(stream_fn),
-            // Model tools: `ipython` only; the engine adds the kernel-backed `ipython` tool itself.
-            tools: vec![],
+            // The normal engine adds `ipython`; the spike profile exposes only dispatch_review.
+            tools: review_tools,
             custom_system_prompt: create_resources.system_prompt,
             prompt_guidelines: create_resources.append_system_prompt,
             generic_mcp_servers: vec![],
@@ -963,7 +1029,7 @@ impl AgentSessionEngine {
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             model_info: Some(model.clone()),
             // Prewarm; the depth gate keeps subagent workers lazy.
-            prewarm_ipython_kernel: Some(true),
+            prewarm_ipython_kernel: Some(!review_spike),
             on_background_work_settled,
             // The worker-installed purge withdraws queued minted continuations.
             queued_goal_context_purge,
@@ -979,9 +1045,13 @@ impl AgentSessionEngine {
                 wiring.binding = self.kernel_cron_binding().or(wiring.binding);
                 wiring
             }),
-        })
-        .await
-        .inspect(|engine| {
+        };
+        let engine = if review_spike {
+            pa_core::session_engine::engine::create_review_session(session_config).await
+        } else {
+            pa_core::session_engine::engine::create_session(session_config).await
+        };
+        engine.inspect(|engine| {
             // A queue-mode switch that landed mid-build wrote only the live slot: re-apply the
             // modes so the first build never serves a stale one.
             let (steering_mode, follow_up_mode) = {
