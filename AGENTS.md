@@ -211,16 +211,22 @@ Layering rules:
 
 - Cursor Bugbot's PR review rules (`.cursor/BUGBOT.md`) mirror the standards in this file - update both whenever either changes.
 
-## Big Brother product overlay
+## Agent skills
 
-This fork hosts Big Brother, a repository review agent built on this
-framework. Product-level guidance for agents:
+### Issue tracker
 
-- `CONTEXT.md` — product terminology. Where terms differ from the beta
-  implementation, ADRs 0018–0023 govern.
-- `docs/adr/` — product decision record, imported from the beta repository;
-  numbering continues from there.
-- `docs/agents/` — issue tracker, triage labels, and domain doc conventions.
+Big Brother's own development issues/specs use this repository's GitHub
+Issues. Review finding issues are published to the watched repository's
+GitHub Issues; native trackers are deferred. See
+`docs/agents/issue-tracker.md`.
 
-The framework guidance in the sections above still applies to the crates this
-fork inherits.
+### Triage labels
+
+Use the five canonical triage labels plus the project labels `defer` and `prone`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo with root `CONTEXT.md` and `docs/adr/`. ADR
+numbering continues from the beta repository (`clingto7/BigBrother-beta`).
+The framework guidance in the sections above still applies to the crates
+this fork inherits. See `docs/agents/domain.md`.
