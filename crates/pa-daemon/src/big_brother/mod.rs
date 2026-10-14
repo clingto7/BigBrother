@@ -7,6 +7,7 @@
 //! (ADR 0022) are a separate concern with their own lifecycle.
 
 pub mod harvest;
+pub mod observer;
 pub mod profile;
 pub mod state;
 

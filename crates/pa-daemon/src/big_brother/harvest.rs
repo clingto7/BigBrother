@@ -141,6 +141,9 @@ pub fn harvest_review(
                         reason: "layer, baseSha, and headSha are all required".to_string(),
                     });
                 };
+                // A retried range supersedes its earlier dispatch: the
+                // last call per layer is the authoritative one.
+                calls.retain(|existing| existing.layer != layer);
                 calls.push(Call { layer, base, head });
             }
         }
@@ -187,6 +190,24 @@ pub fn harvest_review(
         layers,
         conclusion,
     })
+}
+
+/// The last assistant text of a `get_messages` payload (`{"messages":
+/// [...]}`, or the bare array): the observer's child-answer source — the
+/// full final answer, where the roster previews are capped.
+#[must_use]
+pub fn last_assistant_text(payload: &Value) -> Option<String> {
+    let rows = payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .or_else(|| payload.as_array())?;
+    rows.iter()
+        .rev()
+        .find(|row| row.get("role").and_then(Value::as_str) == Some("assistant"))
+        .and_then(|row| {
+            let text = content_text(row);
+            (!text.is_empty()).then_some(text)
+        })
 }
 
 /// A tool call's arguments as an object: native rows carry an object;
@@ -261,6 +282,20 @@ mod tests {
         .into_iter()
         .map(|(layer, answer)| (layer.to_string(), answer.to_string()))
         .collect()
+    }
+
+    #[test]
+    fn the_last_assistant_text_wins_over_earlier_turns() {
+        let payload = json!({ "messages": [
+            { "role": "assistant", "content": [{ "type": "text", "text": "first" }] },
+            { "role": "custom", "content": "a child reply" },
+            { "role": "assistant", "content": [{ "type": "text", "text": "final answer" }] },
+        ]});
+        assert_eq!(
+            last_assistant_text(&payload).as_deref(),
+            Some("final answer")
+        );
+        assert_eq!(last_assistant_text(&json!({ "messages": [] })), None);
     }
 
     #[test]

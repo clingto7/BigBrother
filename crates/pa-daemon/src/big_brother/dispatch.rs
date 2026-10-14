@@ -68,10 +68,14 @@ pub(crate) fn dispatch_review_tool(
                         .join(", ");
                     anyhow::bail!("unknown review layer \"{layer}\"; configured layers: {names}");
                 };
+                // The child's name carries the range head: a later range
+                // reuses the layer (name reservation would refuse the
+                // same name), and the observer matches the exact
+                // in-flight range — a stale child never answers for it.
                 let handle = children
                     .spawn(RlmSpawnRequest {
                         prompt: format!("Review {layer} for {base}..{head}"),
-                        name: Some(layer.clone()),
+                        name: Some(format!("{layer}-{head}")),
                         model: Some(model.to_string()),
                         thinking: None,
                         spawned_by_request_id: None,
@@ -79,7 +83,7 @@ pub(crate) fn dispatch_review_tool(
                     })
                     .await?;
                 Ok(ToolExecutionResult::text(format!(
-                    "layer {layer} reviewer spawned as child {}",
+                    "layer {layer} reviewer spawned as child {} for {base}..{head}",
                     handle.rlm_child_id
                 )))
             })

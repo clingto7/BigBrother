@@ -154,52 +154,74 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
     let request: Value = serde_json::from_slice(&body).map_err(std::io::Error::other)?;
     let model = request["model"].as_str().unwrap_or_default();
     let data = if model == "main" {
-        match main_calls.fetch_add(1, Ordering::SeqCst) {
-            0 => vec![
-                chunk(&json!({"role": "assistant", "content": "ready"}), None),
-                chunk(&json!({}), Some("stop")),
-            ],
-            1 => {
+        let index = main_calls.fetch_add(1, Ordering::SeqCst);
+        // Content-driven script (ranges repeat across wakes): bootstrap
+        // is the first call; a wake whose head has no dispatched reviewer
+        // yet dispatches; every later turn of the same range answers text.
+        let dispatch_turn = index != 0
+            && (|| {
                 let request_text = request.to_string();
                 // The LAST marker is the user message: the conductor
                 // system prompt also names the REVIEW_RANGE shape.
                 let (base, head) = request_text
                     .rsplit_once("REVIEW_RANGE ")
                     .and_then(|(_, suffix)| suffix.split_once(" END"))
-                    .and_then(|(range, _)| range.split_once(".."))
-                    .expect("wake request contains fixed range");
-                let layers = ["requirements", "project-fit", "implementation"];
-                let calls: Vec<Value> = layers
-                    .iter()
-                    .enumerate()
-                    .map(|(index, layer)| {
-                        json!({
-                            "index": index,
-                            "id": format!("call-review-{index}"),
-                            "type": "function",
-                            "function": {
-                                "name": "dispatch_review",
-                                "arguments": json!({
-                                    "layer": layer,
-                                    "baseSha": base,
-                                    "headSha": head
-                                }).to_string()
-                            }
-                        })
+                    .and_then(|(range, _)| range.split_once(".."))?;
+                if base.starts_with('<') {
+                    return None;
+                }
+                // Already dispatched for this head: the tool results say
+                // "reviewer spawned as child ... for <base>..<head>".
+                if request_text.contains(&format!("for {base}..{head}")) {
+                    return None;
+                }
+                Some(())
+            })()
+            .is_some();
+        if dispatch_turn {
+            let request_text = request.to_string();
+            let (base, head) = request_text
+                .rsplit_once("REVIEW_RANGE ")
+                .and_then(|(_, suffix)| suffix.split_once(" END"))
+                .and_then(|(range, _)| range.split_once(".."))
+                .expect("wake request contains fixed range");
+            let layers = ["requirements", "project-fit", "implementation"];
+            let calls: Vec<Value> = layers
+                .iter()
+                .enumerate()
+                .map(|(index, layer)| {
+                    json!({
+                        "index": index,
+                        "id": format!("call-review-{index}-{head}"),
+                        "type": "function",
+                        "function": {
+                            "name": "dispatch_review",
+                            "arguments": json!({
+                                "layer": layer,
+                                "baseSha": base,
+                                "headSha": head
+                            }).to_string()
+                        }
                     })
-                    .collect();
-                vec![
-                    chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
-                    chunk(&json!({}), Some("tool_calls")),
-                ]
-            }
-            _ => vec![
+                })
+                .collect();
+            vec![
+                chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
+                chunk(&json!({}), Some("tool_calls")),
+            ]
+        } else if index == 0 {
+            vec![
+                chunk(&json!({"role": "assistant", "content": "ready"}), None),
+                chunk(&json!({}), Some("stop")),
+            ]
+        } else {
+            vec![
                 chunk(
                     &json!({"role": "assistant", "content": "review dispatched"}),
                     None,
                 ),
                 chunk(&json!({}), Some("stop")),
-            ],
+            ]
         }
     } else {
         vec![
@@ -558,7 +580,11 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         let sessions = response["data"]["sessions"].as_array()?;
         let children: Vec<Value> = sessions
             .iter()
-            .filter(|row| layers.iter().any(|layer| row["sessionName"] == *layer))
+            .filter(|row| {
+                layers
+                    .iter()
+                    .any(|layer| row["sessionName"] == format!("{layer}-{head}"))
+            })
             .cloned()
             .collect();
         (children.len() == 3).then_some(children)
@@ -568,7 +594,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     for layer in layers {
         let child = child_summaries
             .iter()
-            .find(|row| row["sessionName"] == layer)
+            .find(|row| row["sessionName"] == format!("{layer}-{head}"))
             .expect("child");
         assert_eq!(child["model"]["provider"], "prime-inference");
         assert_eq!(child["model"]["id"], layer);
@@ -678,6 +704,169 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         Admission::AlreadyReviewed { head: head.clone() }
     );
     assert_eq!(main_calls.load(Ordering::SeqCst), main_calls_after_review);
+}
+
+/// The observer process handle: killed at teardown like the daemon, so a
+/// finished test never leaks a scanning process.
+struct Observer {
+    child: Child,
+}
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Spawn the REAL watch service: the product binary polls the daemon, not
+/// the test.
+#[allow(clippy::zombie_processes)]
+fn spawn_observer(socket: &Path, agent_dir: &Path) -> Observer {
+    let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+        .arg("observer")
+        .arg("--socket")
+        .arg(socket)
+        .arg("--agent-dir")
+        .arg(agent_dir)
+        .arg("--interval-secs")
+        .arg("1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the observer");
+    Observer { child }
+}
+
+/// The acceptance loop with the real observer: a commit lands, the
+/// observer admits the range, wakes the conductor, waits for the layers,
+/// harvests, and persists the record; a daemon+observer restart recovers
+/// and reviews the next range without duplicating the first.
+#[test]
+fn the_observer_discovers_ranges_completes_records_and_recovers() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("code.txt"), "baseline\n").expect("baseline file");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "baseline"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+    let agent_dir = dir.path().join("agent");
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let url = spawn_review_mock(Arc::clone(&main_calls));
+    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id": id, "name": id, "api": "openai-completions",
+                "contextWindow": 128_000, "maxTokens": 4096
+            })
+        })
+        .collect();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": { "prime-inference": {
+                "api": "openai-completions", "baseUrl": url.to_string_lossy(),
+                "apiKey": "sk-review-test", "models": models
+            }}
+        })
+        .to_string(),
+    )
+    .expect("models.json");
+    write_review_profile(&agent_dir, &repo);
+    let store = RepositoryStateStore::open(&agent_dir, &repo);
+    store.seed_cursor(&branch, &base).expect("seed baseline");
+
+    let socket = dir.path().join("daemon.sock");
+    let daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command(
+        "create",
+        &json!({
+            "type": "create", "name": "review-main",
+            "config": { "cwd": repo, "sessionDir": sessions,
+                "bigBrotherReview": true }
+        }),
+    );
+    let created = client.read_response("create");
+    assert_eq!(created["success"], true, "{created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active id")
+        .to_string();
+    client.send_command(
+        "bootstrap",
+        &json!({
+            "type": "prompt_and_wait", "activeSessionId": active_id, "message": "bootstrap"
+        }),
+    );
+    assert_eq!(client.read_response("bootstrap")["success"], true);
+    drop(client);
+
+    let observer = spawn_observer(&socket, &agent_dir);
+
+    // A new commit lands while the observer watches.
+    std::fs::write(repo.join("code.txt"), "first change\n").expect("first change");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "first change"]);
+    let head1 = git(&repo, &["rev-parse", "HEAD"]);
+    let records = wait_until(Duration::from_secs(90), || {
+        (store.records(&branch).unwrap().len() == 1).then(|| store.records(&branch).unwrap())
+    });
+    let record = &records[0];
+    assert_eq!(record.base, base);
+    assert_eq!(record.head, head1);
+    assert_eq!(record.layers.len(), 3);
+    assert_eq!(record.conclusion.as_deref(), Some("review dispatched"));
+    for layer in &record.layers {
+        assert_eq!(
+            layer.answer.as_deref(),
+            Some(format!("{} reviewed", layer.layer).as_str())
+        );
+        assert_eq!(
+            layer.model,
+            format!("prime-inference/{}", layer.layer),
+            "the record names each layer's profile model"
+        );
+        assert!(layer.child.is_some(), "the record names each child");
+    }
+    let state = store.load().unwrap();
+    assert_eq!(
+        state.branches[&branch].cursor.as_deref(),
+        Some(head1.as_str())
+    );
+
+    // Extra scans do not duplicate the review.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(store.records(&branch).unwrap().len(), 1);
+
+    // A daemon + observer restart: the next range reviews normally.
+    drop(observer);
+    drop(daemon);
+    std::fs::remove_file(&socket).ok();
+    let _daemon2 = spawn_daemon(&socket, &agent_dir);
+    let _observer2 = spawn_observer(&socket, &agent_dir);
+    std::fs::write(repo.join("code.txt"), "second change\n").expect("second change");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "second change"]);
+    let head2 = git(&repo, &["rev-parse", "HEAD"]);
+    let records = wait_until(Duration::from_secs(90), || {
+        (store.records(&branch).unwrap().len() == 2).then(|| store.records(&branch).unwrap())
+    });
+    // Records sort by head sha, not completion order: match by head.
+    let second = records
+        .iter()
+        .find(|record| record.head == head2)
+        .expect("the second range's record");
+    assert_eq!(second.base, head1, "the second range continues the cursor");
+    assert_eq!(second.layers.len(), 3);
 }
 
 #[test]

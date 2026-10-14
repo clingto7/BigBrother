@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use super::profile::repo_dir;
 
 /// The only repository-state schema version this build reads.
-const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 1;
 /// The only review-record schema version this build reads.
 const RECORD_VERSION: u32 = 1;
 /// Staleness for the repository state lock (the settings default).
@@ -29,6 +29,11 @@ const LOCK_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10)
 pub struct RepositoryState {
     /// The schema version; anything else is a loud error.
     pub version: u32,
+    /// The watched repository's git root, recorded at every write so the
+    /// observer can find the persistent work tree from the state alone
+    /// (the directory slug does not invert).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_root: Option<String>,
     #[serde(default)]
     pub branches: BTreeMap<String, BranchState>,
 }
@@ -37,6 +42,7 @@ impl Default for RepositoryState {
     fn default() -> Self {
         RepositoryState {
             version: STATE_VERSION,
+            git_root: None,
             branches: BTreeMap::new(),
         }
     }
@@ -239,6 +245,7 @@ pub enum StateError {
 #[derive(Debug, Clone)]
 pub struct RepositoryStateStore {
     repo_dir: PathBuf,
+    git_root: PathBuf,
 }
 
 impl RepositoryStateStore {
@@ -248,6 +255,7 @@ impl RepositoryStateStore {
     pub fn open(agent_dir: &Path, git_root: &Path) -> Self {
         RepositoryStateStore {
             repo_dir: repo_dir(agent_dir, git_root),
+            git_root: git_root.to_path_buf(),
         }
     }
 
@@ -255,6 +263,12 @@ impl RepositoryStateStore {
     #[must_use]
     pub fn state_path(&self) -> PathBuf {
         self.repo_dir.join("state.json")
+    }
+
+    /// The watched repository's git root this store was opened for.
+    #[must_use]
+    pub fn git_root(&self) -> &Path {
+        &self.git_root
     }
 
     /// The completed records of one branch, oldest first.
@@ -533,8 +547,12 @@ impl RepositoryStateStore {
     }
 
     fn write_state(&self, state: &RepositoryState) -> Result<(), StateError> {
+        // The store owns the git-root record: every write refreshes it
+        // from the store's own construction identity.
+        let mut state = state.clone();
+        state.git_root = Some(self.git_root.to_string_lossy().into_owned());
         let body =
-            serde_json::to_string_pretty(state).map_err(|source| StateError::MalformedState {
+            serde_json::to_string_pretty(&state).map_err(|source| StateError::MalformedState {
                 path: self.state_path(),
                 source,
             })?;
