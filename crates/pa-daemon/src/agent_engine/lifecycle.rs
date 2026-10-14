@@ -985,7 +985,14 @@ impl AgentSessionEngine {
             // The normal engine adds `ipython`; the review profile exposes
             // only the supplied review tools.
             tools: review_tools,
-            custom_system_prompt: create_resources.system_prompt,
+            // The review profile owns the conductor prompt (ADR 0026):
+            // derived from the profile at every build, so a cold wake
+            // rebuilds it — create-config system prompts do not survive
+            // daemon restarts.
+            custom_system_prompt: review_profile
+                .as_ref()
+                .map(|profile| crate::big_brother::prompt::conductor_system_prompt(profile))
+                .or(create_resources.system_prompt),
             prompt_guidelines: create_resources.append_system_prompt,
             generic_mcp_servers: vec![],
             allow_recursion: None,

@@ -1,7 +1,10 @@
 //! The review main session's dispatch tool: spawn one review-layer child
-//! for an immutable range. The layer's reviewer model comes from the
-//! repository's review profile — configuration, never the main agent's
-//! tool-argument choice (ADR 0019).
+//! for an immutable range and return its child id. The layer's reviewer
+//! model comes from the repository's review profile — configuration,
+//! never the main agent's tool-argument choice (ADR 0019). The child runs
+//! after the conductor's turn settles (the framework's spawn model); its
+//! full answer is collected observer-side, never through a mid-turn wait
+//! (which the spawn deferral would deadlock).
 
 use std::sync::Arc;
 
@@ -29,7 +32,7 @@ pub(crate) fn dispatch_review_tool(
     bridge_tool(ToolDefinition {
         name: "dispatch_review".into(),
         label: "Dispatch review".into(),
-        description: "Dispatch one review layer for an immutable range; each layer's reviewer model is fixed by the repository's review profile".into(),
+        description: "Dispatch one review layer for an immutable range; the layer's reviewer runs after this turn settles and its reply arrives as a child message. Each layer's reviewer model is fixed by the repository's review profile".into(),
         prompt_snippet: String::new(),
         parameters: serde_json::json!({
             "type": "object",
@@ -68,14 +71,17 @@ pub(crate) fn dispatch_review_tool(
                 let handle = children
                     .spawn(RlmSpawnRequest {
                         prompt: format!("Review {layer} for {base}..{head}"),
-                        name: Some(layer),
+                        name: Some(layer.clone()),
                         model: Some(model.to_string()),
                         thinking: None,
                         spawned_by_request_id: None,
                         cell_source_code: None,
                     })
                     .await?;
-                Ok(ToolExecutionResult::text(handle.rlm_child_id))
+                Ok(ToolExecutionResult::text(format!(
+                    "layer {layer} reviewer spawned as child {}",
+                    handle.rlm_child_id
+                )))
             })
         }),
     })

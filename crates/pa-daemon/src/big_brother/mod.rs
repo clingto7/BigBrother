@@ -6,7 +6,9 @@
 //! operating rules. The work tree's `.big-brother` understanding assets
 //! (ADR 0022) are a separate concern with their own lifecycle.
 
+pub mod harvest;
 pub mod profile;
 pub mod state;
 
 pub(crate) mod dispatch;
+pub(crate) mod prompt;

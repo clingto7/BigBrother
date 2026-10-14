@@ -161,8 +161,10 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
             ],
             1 => {
                 let request_text = request.to_string();
+                // The LAST marker is the user message: the conductor
+                // system prompt also names the REVIEW_RANGE shape.
                 let (base, head) = request_text
-                    .split_once("REVIEW_RANGE ")
+                    .rsplit_once("REVIEW_RANGE ")
                     .and_then(|(_, suffix)| suffix.split_once(" END"))
                     .and_then(|(range, _)| range.split_once(".."))
                     .expect("wake request contains fixed range");
@@ -561,7 +563,8 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
             .collect();
         (children.len() == 3).then_some(children)
     });
-    let mut record_layers = Vec::new();
+    let mut child_ids = std::collections::BTreeMap::new();
+    let mut child_answers = std::collections::BTreeMap::new();
     for layer in layers {
         let child = child_summaries
             .iter()
@@ -581,25 +584,52 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
             answer.contains(&format!("Review {layer} for {base}..{head}")),
             "{answer}"
         );
-        // The observed child answer rides the record (structured child
-        // result collection arrives with the synthesis increment).
-        record_layers.push(ReviewRecordLayer {
-            layer: layer.to_string(),
-            model: format!("prime-inference/{layer}"),
-            child: Some(child_id.to_string()),
-            answer: Some(format!("{layer} reviewed")),
-        });
+        child_ids.insert(layer.to_string(), child_id.to_string());
+        child_answers.insert(layer.to_string(), format!("{layer} reviewed"));
     }
+
+    // The review conversation (ADR 0026): the transcript carries the
+    // dispatch calls and the conductor's synthesis; the layers' full
+    // answers come from the children themselves (observer-side
+    // collection — a mid-turn wait would deadlock the spawn deferral).
+    // The product collector assembles the record from both.
+    let transcript: Value =
+        serde_json::from_str(&messages(&mut client, "harvest", woken_id)).expect("transcript json");
+    let harvested = pa_daemon::big_brother::harvest::harvest_review(&transcript, &child_answers)
+        .expect("harvest the completed review");
+    assert_eq!(harvested.base, base);
+    assert_eq!(harvested.head, head);
+    assert_eq!(harvested.conclusion, "review dispatched");
+    assert_eq!(harvested.layers.len(), 3);
+    for layer in &harvested.layers {
+        assert_eq!(layer.answer, format!("{} reviewed", layer.layer));
+    }
+    let profile = pa_daemon::big_brother::profile::resolve_profile(&agent_dir, &repo)
+        .expect("resolve the repository profile")
+        .expect("profile present");
+
     // Persist one review record before any delivery (ADR 0021) and advance
     // the cursor through the same product boundary.
     let record = ReviewRecord {
         version: 1,
         branch: branch.clone(),
-        base: range.base,
-        head: range.head,
+        base: harvested.base,
+        head: harvested.head,
         completed_at: String::new(),
-        layers: record_layers,
-        conclusion: Some("review dispatched".to_string()),
+        layers: harvested
+            .layers
+            .into_iter()
+            .map(|layer| ReviewRecordLayer {
+                model: profile
+                    .layer_model(&layer.layer)
+                    .expect("profile layer model")
+                    .to_string(),
+                child: child_ids.get(&layer.layer).cloned(),
+                answer: Some(layer.answer),
+                layer: layer.layer,
+            })
+            .collect(),
+        conclusion: Some(harvested.conclusion),
         delivery: std::collections::BTreeMap::default(),
     };
     match store.complete(record).expect("complete the range") {
@@ -626,7 +656,11 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     assert_eq!(records[0].head, head);
     assert_eq!(records[0].layers.len(), 3);
     assert_eq!(records[0].conclusion.as_deref(), Some("review dispatched"));
-    assert_eq!(main_calls.load(Ordering::SeqCst), 3);
+    // The review ran exactly once; the exact main-model call count varies
+    // with child settle notices triggering follow-up turns, so the count
+    // is captured here and must not move across the restart below.
+    let main_calls_after_review = main_calls.load(Ordering::SeqCst);
+    assert!(main_calls_after_review >= 3);
     drop(client);
     drop(restarted);
     std::fs::remove_file(&socket).ok();
@@ -643,7 +677,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         store.admit(&branch, &head).expect("re-admission probe"),
         Admission::AlreadyReviewed { head: head.clone() }
     );
-    assert_eq!(main_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(main_calls.load(Ordering::SeqCst), main_calls_after_review);
 }
 
 #[test]
