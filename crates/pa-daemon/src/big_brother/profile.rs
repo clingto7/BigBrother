@@ -8,10 +8,10 @@
 use std::path::{Path, PathBuf};
 
 /// The only profile schema version this build reads.
-const PROFILE_VERSION: u32 = 1;
+pub(crate) const PROFILE_VERSION: u32 = 1;
 
 /// The review profile of one watched repository.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewProfile {
     /// The schema version; anything else is a loud error, never a
@@ -31,7 +31,7 @@ pub struct ReviewProfile {
 }
 
 /// One review layer's child configuration.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewLayer {
     /// The layer's stable name (the dispatch argument the main agent
@@ -88,7 +88,7 @@ impl ReviewProfile {
     /// # Errors
     ///
     /// Returns the matching [`ProfileError`] for the first violation.
-    fn validate(&self, path: &Path) -> Result<(), ProfileError> {
+    pub(crate) fn validate(&self, path: &Path) -> Result<(), ProfileError> {
         let invalid = |reason: String| ProfileError::Invalid {
             path: path.to_path_buf(),
             reason,

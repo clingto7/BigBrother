@@ -7,9 +7,13 @@
 //! (ADR 0022) are a separate concern with their own lifecycle.
 
 pub mod harvest;
+pub mod init;
 pub mod observer;
 pub mod profile;
+pub mod query;
 pub mod state;
 
+pub(crate) mod client;
 pub(crate) mod dispatch;
+pub(crate) mod git;
 pub(crate) mod prompt;

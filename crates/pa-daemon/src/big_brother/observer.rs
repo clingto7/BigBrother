@@ -14,18 +14,15 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context as _, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::big_brother::client::{session_id, DaemonClient};
+use crate::big_brother::git::branch_head;
 use crate::big_brother::harvest::{harvest_review, last_assistant_text};
 use crate::big_brother::profile::ReviewProfile;
 use crate::big_brother::state::{
     Admission, RepositoryState, RepositoryStateStore, ReviewRange, ReviewRecord, ReviewRecordLayer,
     STATE_VERSION,
 };
-
-/// Per-request protocol timeout: a stuck daemon fails the scan, never the
-/// observer.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The watch service's runtime options.
 #[derive(Debug, Clone)]
@@ -265,24 +262,6 @@ async fn wake_conductor(
     Ok(())
 }
 
-/// The tracked branch's head in the persistent work tree.
-fn branch_head(git_root: &Path, branch: &str) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(git_root)
-        .arg("rev-parse")
-        .arg(branch)
-        .output()
-        .with_context(|| format!("running git rev-parse in {}", git_root.display()))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "git rev-parse {branch}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
-}
-
 /// The repository state off disk (same document the store writes).
 fn read_state(repo_dir: &Path) -> Result<RepositoryState> {
     let bytes = std::fs::read(repo_dir.join("state.json"))
@@ -320,102 +299,6 @@ fn store_agent_dir(repo_dir: &Path) -> PathBuf {
         .ancestors()
         .nth(3)
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
-}
-
-/// One roster row's session id.
-fn session_id(row: &Value) -> Result<String> {
-    row.get("id")
-        .or_else(|| row.get("activeSessionId"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("roster row carries no session id: {row}"))
-}
-
-/// A lazily-connected daemon protocol client, shared across one scan.
-struct DaemonClient {
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: tokio::net::unix::OwnedWriteHalf,
-    next_id: u64,
-}
-
-impl DaemonClient {
-    /// Connect and consume the hello line.
-    async fn connect(socket_path: &Path) -> Result<Self> {
-        let stream = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            tokio::net::UnixStream::connect(socket_path),
-        )
-        .await
-        .context("timed out connecting to the daemon")?
-        .with_context(|| format!("connecting to daemon socket {}", socket_path.display()))?;
-        let (read_half, write_half) = stream.into_split();
-        let mut client = DaemonClient {
-            reader: BufReader::new(read_half),
-            writer: write_half,
-            next_id: 0,
-        };
-        let _hello = client.read_line().await?;
-        Ok(client)
-    }
-
-    async fn request(&mut self, command: Value) -> Result<Value> {
-        self.next_id += 1;
-        let id = format!("observer-{}", self.next_id);
-        let envelope = json!({
-            "type": "command",
-            "id": id,
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "command": command,
-        });
-        let mut line = serde_json::to_string(&envelope)?;
-        line.push('\n');
-        tokio::time::timeout(REQUEST_TIMEOUT, self.writer.write_all(line.as_bytes()))
-            .await
-            .context("timed out sending a daemon command")?
-            .context("sending a daemon command")?;
-        self.writer
-            .flush()
-            .await
-            .context("flushing a daemon command")?;
-        tokio::time::timeout(REQUEST_TIMEOUT, async {
-            loop {
-                let response = self.read_line().await?;
-                if response.get("id").and_then(Value::as_str) == Some(id.as_str()) {
-                    if response.get("success") != Some(&Value::Bool(true)) {
-                        anyhow::bail!("daemon command failed: {response}");
-                    }
-                    return Ok(response);
-                }
-            }
-        })
-        .await
-        .context("timed out waiting for the daemon")?
-    }
-
-    async fn read_line(&mut self) -> Result<Value> {
-        let mut line = String::new();
-        tokio::time::timeout(REQUEST_TIMEOUT, self.reader.read_line(&mut line))
-            .await
-            .context("timed out reading a daemon line")?
-            .context("the daemon closed the connection")?;
-        serde_json::from_str(line.trim()).context("parsing a daemon line")
-    }
-
-    async fn list_sessions(&mut self) -> Result<Vec<Value>> {
-        let response = self.request(json!({ "type": "list" })).await?;
-        Ok(response["data"]["sessions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    async fn get_messages(&mut self, active_session_id: &str) -> Result<Value> {
-        self.request(json!({
-            "type": "get_messages", "activeSessionId": active_session_id
-        }))
-        .await
-        .map(|response| response["data"].clone())
-    }
 }
 
 /// Connect the shared scan client if needed.
