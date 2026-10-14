@@ -35,6 +35,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use pa_daemon::big_brother::state::{
+    Admission, Completion, RepositoryStateStore, ReviewRecord, ReviewRecordLayer,
+};
+
 struct Daemon {
     child: Child,
     #[allow(dead_code)]
@@ -366,34 +370,12 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .to_string()
 }
 
-/// The profile-side slug of a watched repo's git root — the test-side
-/// mirror of the product's slug rule (the integration test cannot reach
-/// the crate-private module).
-fn profile_repo_slug(repo: &Path) -> String {
-    let mut slug = String::new();
-    let mut in_separator_run = false;
-    for character in repo.to_string_lossy().chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            in_separator_run = false;
-        } else if !in_separator_run {
-            slug.push('-');
-            in_separator_run = true;
-        }
-    }
-    slug.trim_matches('-').to_string()
-}
-
 /// Write the repository's review profile (ADR 0024) under the agent dir:
 /// the wake name, the main model, and the three layer models. Stored
 /// outside the work tree on purpose — reviewed content must not edit the
 /// reviewer's operating rules.
 fn write_review_profile(agent_dir: &Path, repo: &Path) {
-    let path = agent_dir
-        .join("big-brother")
-        .join("profiles")
-        .join(profile_repo_slug(repo))
-        .join("profile.json");
+    let path = pa_daemon::big_brother::profile::profile_path(agent_dir, repo);
     std::fs::create_dir_all(path.parent().expect("profile dir")).expect("profile dir");
     std::fs::write(
         &path,
@@ -448,8 +430,13 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         .to_string(),
     )
     .expect("models.json");
-    let cursor = dir.path().join("cursor");
-    std::fs::write(&cursor, &base).expect("initial observer cursor");
+    let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let store = RepositoryStateStore::open(&agent_dir, &repo);
+    // Enrollment seeds the baseline cursor through the product boundary
+    // (the dedicated `init` command owns this in a later increment).
+    store
+        .seed_cursor(&branch, &base)
+        .expect("seed baseline cursor");
     write_review_profile(&agent_dir, &repo);
     let socket = dir.path().join("daemon.sock");
     let daemon = spawn_daemon(&socket, &agent_dir);
@@ -500,15 +487,30 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
             .map(Vec::len),
         Some(0)
     );
-    let stored_base = std::fs::read_to_string(&cursor).expect("restore cursor");
+    // The durable repository state survived the daemon restart: the cursor
+    // holds the seeded baseline and no range is in flight.
+    let state = store.load().expect("reload repository state");
+    let branch_state = state.branches.get(&branch).expect("branch state");
+    let stored_base = branch_state.cursor.clone().expect("seeded cursor");
     let observed_head = git(&repo, &["rev-parse", "HEAD"]);
     assert_eq!(stored_base, base);
     assert_eq!(observed_head, head);
+    assert!(branch_state.in_flight.is_none());
+    // The observer admits the new range through the product boundary.
+    let range = match store
+        .admit(&branch, &observed_head)
+        .expect("admit the observed range")
+    {
+        Admission::Admitted(range) => range,
+        other => panic!("expected a fresh admission, got {other:?}"),
+    };
+    assert_eq!(range.base, base);
+    assert_eq!(range.head, head);
     client.send_command(
         "wake",
         &json!({
             "type": "send_message", "targetActiveSessionId": "review-main",
-            "message": format!("REVIEW_RANGE {stored_base}..{observed_head} END")
+            "message": format!("REVIEW_RANGE {}..{} END", range.base, range.head)
         }),
     );
     let wake = client.read_response("wake");
@@ -559,7 +561,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
             .collect();
         (children.len() == 3).then_some(children)
     });
-    let mut results = Vec::new();
+    let mut record_layers = Vec::new();
     for layer in layers {
         let child = child_summaries
             .iter()
@@ -579,24 +581,51 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
             answer.contains(&format!("Review {layer} for {base}..{head}")),
             "{answer}"
         );
-        results.push(json!({ "layer": layer, "model": format!("prime-inference/{layer}"), "base": base, "head": head }));
+        // The observed child answer rides the record (structured child
+        // result collection arrives with the synthesis increment).
+        record_layers.push(ReviewRecordLayer {
+            layer: layer.to_string(),
+            model: format!("prime-inference/{layer}"),
+            child: Some(child_id.to_string()),
+            answer: Some(format!("{layer} reviewed")),
+        });
     }
-    let record = dir.path().join("review-record.json");
-    std::fs::write(
-        &record,
-        json!({ "base": base, "head": head, "results": results }).to_string(),
-    )
-    .expect("persist observed results");
-    std::fs::write(&cursor, &head).expect("advance cursor after results");
-    assert_eq!(std::fs::read_to_string(&cursor).unwrap(), head);
+    // Persist one review record before any delivery (ADR 0021) and advance
+    // the cursor through the same product boundary.
+    let record = ReviewRecord {
+        version: 1,
+        branch: branch.clone(),
+        base: range.base,
+        head: range.head,
+        completed_at: String::new(),
+        layers: record_layers,
+        conclusion: Some("review dispatched".to_string()),
+        delivery: std::collections::BTreeMap::default(),
+    };
+    match store.complete(record).expect("complete the range") {
+        Completion::Completed {
+            range: done,
+            record_path,
+        } => {
+            assert_eq!(done.head, head);
+            assert!(record_path.exists());
+        }
+        other @ Completion::AlreadyComplete { .. } => {
+            panic!("expected completion, got {other:?}")
+        }
+    }
+    let state = store.load().expect("state after completion");
     assert_eq!(
-        serde_json::from_str::<Value>(&std::fs::read_to_string(&record).unwrap()).unwrap()
-            ["results"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
+        state.branches[&branch].cursor.as_deref(),
+        Some(head.as_str())
     );
+    assert!(state.branches[&branch].in_flight.is_none());
+    // The record reads back through the product query surface.
+    let records = store.records(&branch).expect("records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].head, head);
+    assert_eq!(records[0].layers.len(), 3);
+    assert_eq!(records[0].conclusion.as_deref(), Some("review dispatched"));
     assert_eq!(main_calls.load(Ordering::SeqCst), 3);
     drop(client);
     drop(restarted);
@@ -608,10 +637,11 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         client.read_response("after-result-restart")["success"],
         true
     );
-    // The observer's durable cursor prevents a second wake for the same head.
+    // The durable repository state prevents a second admission for the
+    // already-reviewed head: no duplicate wake after another restart.
     assert_eq!(
-        git(&repo, &["rev-parse", "HEAD"]),
-        std::fs::read_to_string(&cursor).unwrap()
+        store.admit(&branch, &head).expect("re-admission probe"),
+        Admission::AlreadyReviewed { head: head.clone() }
     );
     assert_eq!(main_calls.load(Ordering::SeqCst), 3);
 }

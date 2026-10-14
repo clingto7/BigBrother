@@ -1,8 +1,9 @@
 //! The per-repository review profile: the operator-owned configuration
 //! that selects the restricted review session, its stable wake name, and
 //! the review-layer child models (ADR 0019/0024). Stored at
-//! `<agent-dir>/big-brother/profiles/<repo-slug>/profile.json`, keyed by
-//! the watched repository's local git root.
+//! `<agent-dir>/big-brother/repos/<repo-slug>/profile.json` inside the
+//! repository-keyed directory it shares with the durable repository
+//! state (ADR 0025), keyed by the watched repository's local git root.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,7 @@ const PROFILE_VERSION: u32 = 1;
 /// The review profile of one watched repository.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ReviewProfile {
+pub struct ReviewProfile {
     /// The schema version; anything else is a loud error, never a
     /// silent downgrade to a normal session.
     pub version: u32,
@@ -32,7 +33,7 @@ pub(crate) struct ReviewProfile {
 /// One review layer's child configuration.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ReviewLayer {
+pub struct ReviewLayer {
     /// The layer's stable name (the dispatch argument the main agent
     /// uses and the child session's name).
     pub name: String,
@@ -45,7 +46,7 @@ pub(crate) struct ReviewLayer {
 /// silently downgrades to normal tools would widen the tool boundary
 /// without an operator decision.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ProfileError {
+pub enum ProfileError {
     /// The profile's schema version is not one this build understands.
     #[error("unsupported review profile version {found} (expected {PROFILE_VERSION})")]
     UnsupportedVersion { found: u32 },
@@ -72,7 +73,8 @@ pub(crate) enum ProfileError {
 
 impl ReviewProfile {
     /// The configured model selector for a review layer.
-    pub(crate) fn layer_model(&self, layer: &str) -> Option<&str> {
+    #[must_use]
+    pub fn layer_model(&self, layer: &str) -> Option<&str> {
         self.layers
             .iter()
             .find(|candidate| candidate.name == layer)
@@ -126,13 +128,20 @@ impl ReviewProfile {
     }
 }
 
-/// The profile file path for a watched repository rooted at `git_root`.
-pub(crate) fn profile_path(agent_dir: &Path, git_root: &Path) -> PathBuf {
+/// The repository-keyed directory under the agent dir:
+/// `<agent>/big-brother/repos/<slug>/` — the review profile, the durable
+/// repository state, and the review records (ADR 0025).
+pub(crate) fn repo_dir(agent_dir: &Path, git_root: &Path) -> PathBuf {
     agent_dir
         .join("big-brother")
-        .join("profiles")
+        .join("repos")
         .join(repo_slug(git_root))
-        .join("profile.json")
+}
+
+/// The profile file path for a watched repository rooted at `git_root`.
+#[must_use]
+pub fn profile_path(agent_dir: &Path, git_root: &Path) -> PathBuf {
+    repo_dir(agent_dir, git_root).join("profile.json")
 }
 
 /// A stable directory slug for a watched repository's git root: the
@@ -163,7 +172,7 @@ fn repo_slug(git_root: &Path) -> String {
 /// Returns `Ok(None)` when the directory is outside a git repository or
 /// the repository has no profile file. A present-but-unusable profile is
 /// an error (see [`ProfileError`]) — never a silent downgrade.
-pub(crate) fn resolve_profile(
+pub fn resolve_profile(
     agent_dir: &Path,
     cwd: &Path,
 ) -> Result<Option<ReviewProfile>, ProfileError> {
