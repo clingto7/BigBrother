@@ -387,18 +387,27 @@ async fn cancel_attempt(
 /// The conductor's wake message for one attempt (ADR 0026's range shape;
 /// a retried attempt appends ADR 0028's explicit retry instruction — the
 /// cancelled attempt's answers died with its in-memory children, so the
-/// fresh attempt dispatches every layer anew).
+/// fresh attempt dispatches every layer anew). Both variants carry
+/// ADR 0030's synthesis marker contract — the wake message is the most
+/// salient place a model actually obeys it (the system prompt's copy
+/// alone proved ignorable on the real model).
 fn wake_message(range: &ReviewRange, max_attempts: u32) -> String {
+    let marker_contract = "\nAfter every layer has replied, write the range's synthesis as your \
+         final message: the FIRST line must be exactly REVIEW_SYNTHESIS, the synthesis follows \
+         from the next line on. No preamble before that marker line.";
     if range.attempts > 1 {
         format!(
             "REVIEW_RANGE {}..{} END\n\
              Retry attempt {} of {max_attempts}: the prior attempt timed out and its reviewers \
              were cancelled. Dispatch every configured review layer fresh for this range, then \
-             synthesize once all layers have replied.",
+             synthesize once all layers have replied.{marker_contract}",
             range.base, range.head, range.attempts
         )
     } else {
-        format!("REVIEW_RANGE {}..{} END", range.base, range.head)
+        format!(
+            "REVIEW_RANGE {}..{} END{marker_contract}",
+            range.base, range.head
+        )
     }
 }
 

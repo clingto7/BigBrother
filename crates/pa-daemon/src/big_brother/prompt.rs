@@ -27,10 +27,15 @@ message on a later turn.
 
 Once every layer has replied, write the range's synthesis: summarize each \
 layer's findings, keep hard violations separate from advisory \
-observations, and state one overall conclusion for the range. Begin the \
-final message with a line exactly \"REVIEW_SYNTHESIS\" — everything after \
-that line is the synthesis the record keeps. A layer whose reviewer \
-errored or never replied is an unfinished assessment, never a clean pass.
+observations, and state one overall conclusion for the range.
+
+Output contract for the synthesis message: the FIRST line must be exactly \
+\"REVIEW_SYNTHESIS\" and nothing else — no preamble, no narration before it. \
+The synthesis itself follows from the next line on. Everything before that \
+marker line is discarded, so a synthesis without the marker is lost.
+
+A layer whose reviewer errored or never replied is an unfinished \
+assessment, never a clean pass.
 
 This session reviews: it does not modify files, commits, or branches."
     )

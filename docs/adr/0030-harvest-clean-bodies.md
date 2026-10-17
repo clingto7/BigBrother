@@ -26,13 +26,16 @@ never used the message tool still completes, wrapped answer and all.
 The synthesis gets an explicit output contract instead: the conductor
 prompt requires the final message to begin with a line exactly
 `REVIEW_SYNTHESIS`, and the harvest keeps everything after the last
-marker line, trimmed. The conductor is a top-level session — there is
-no parent to deliver a synthesis message to — so the marker is the
-machine-extractable boundary between turn narration and the synthesis
-itself. A text without the marker (a conversation from before the
-contract, or a model that ignored it) is kept whole; an empty
-after-marker body falls back the same way. The system prompt is
-rebuilt at every session build (ADR 0026), so the contract takes
+marker line, trimmed. The contract also rides every wake message — the
+real model ignored the system prompt's copy alone across two smoke
+ranges, and obeyed it on the first wake-carried one; the wake message
+is the salient instruction surface. The conductor is a top-level
+session — there is no parent to deliver a synthesis message to — so
+the marker is the machine-extractable boundary between turn narration
+and the synthesis itself. A text without the marker (a conversation
+from before the contract, or a model that ignored it) is kept whole;
+an empty after-marker body falls back the same way. The system prompt
+is rebuilt at every session build (ADR 0026), so the contract takes
 effect on the next turn without any session migration.
 
 The prompt is derived from the profile at session build, so the
