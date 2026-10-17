@@ -14,6 +14,7 @@ pub mod query;
 pub mod state;
 
 pub(crate) mod client;
+pub(crate) mod delivery;
 pub(crate) mod dispatch;
 pub(crate) mod git;
 pub(crate) mod prompt;

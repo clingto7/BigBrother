@@ -155,11 +155,56 @@ pub struct ReviewRecord {
     /// The main agent's synthesis, when captured.
     #[serde(default)]
     pub conclusion: Option<String>,
-    /// Per-channel durable delivery state. The record file's existence is
-    /// the local channel; later channels (Commit Status, Bark) append
-    /// theirs here, each retrying independently (ADR 0021).
+    /// Per-channel durable delivery state (ADR 0021/0029). The record
+    /// file's existence is the local channel; every enabled channel
+    /// appends its own entry here, retrying independently.
     #[serde(default)]
-    pub delivery: BTreeMap<String, serde_json::Value>,
+    pub delivery: BTreeMap<String, DeliveryState>,
+}
+
+/// One delivery channel's durable state on a record (ADR 0029): how
+/// many sends were attempted, when the last one ran, why it failed,
+/// and when one succeeded.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryState {
+    /// Sends attempted for this channel, the current one included.
+    pub attempts: u32,
+    /// When the last attempt ran (ISO); empty before the first attempt.
+    #[serde(default)]
+    pub last_attempt_at: String,
+    /// Why the last attempt failed; `None` once a send succeeded.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// When a send succeeded; `None` while the channel is pending.
+    #[serde(default)]
+    pub delivered_at: Option<String>,
+}
+
+impl DeliveryState {
+    /// Whether a send succeeded and the channel is done with this
+    /// record.
+    #[must_use]
+    pub fn delivered(&self) -> bool {
+        self.delivered_at.is_some()
+    }
+
+    /// Advance a channel's state over one attempt's outcome (ADR
+    /// 0029): a send without an error delivers, an error stays pending
+    /// with the reason — whatever ran is counted and stamped.
+    #[must_use]
+    pub fn advance(
+        previous: Option<&DeliveryState>,
+        now_iso: String,
+        error: Option<String>,
+    ) -> DeliveryState {
+        DeliveryState {
+            attempts: previous.map_or(1, |state| state.attempts.saturating_add(1)),
+            last_attempt_at: now_iso.clone(),
+            delivered_at: error.is_none().then_some(now_iso),
+            last_error: error,
+        }
+    }
 }
 
 /// One review layer's child result inside a record.
@@ -267,6 +312,14 @@ pub enum StateError {
         branch: String,
         /// The branch whose records were being read.
         expected: String,
+    },
+    /// A delivery update named a record that does not exist.
+    #[error("no review record at {path} to mark delivery on: {source}")]
+    RecordMissing {
+        /// The record file that should carry the delivery state.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
     },
     /// The state lock could not be acquired.
     #[error("failed to acquire the repository state lock: {0}")]
@@ -663,6 +716,52 @@ impl RepositoryStateStore {
         self.repo_dir.join("records").join(sanitize_branch(branch))
     }
 
+    /// Record one channel's delivery outcome on a completed record
+    /// (ADR 0029). Delivery state is the only part of a record that
+    /// mutates after completion; the write takes the same state lock as
+    /// `complete` and replaces the file atomically.
+    ///
+    /// # Errors
+    ///
+    /// Loud when the record does not exist, claims another branch, or
+    /// the read or write fails.
+    pub fn update_delivery(
+        &self,
+        branch: &str,
+        head: &str,
+        channel: &str,
+        state: DeliveryState,
+    ) -> Result<(), StateError> {
+        let lock = self.acquire_lock()?;
+        let record_path = self.records_branch_dir(branch).join(format!("{head}.json"));
+        let bytes = std::fs::read(&record_path).map_err(|source| StateError::RecordMissing {
+            path: record_path.clone(),
+            source,
+        })?;
+        let mut record: ReviewRecord =
+            serde_json::from_slice(&bytes).map_err(|source| StateError::MalformedRecord {
+                path: record_path.clone(),
+                source,
+            })?;
+        if record.branch != branch {
+            return Err(StateError::RecordBranchMismatch {
+                path: record_path,
+                branch: record.branch,
+                expected: branch.to_string(),
+            });
+        }
+        record.delivery.insert(channel.to_string(), state);
+        let body = serde_json::to_string_pretty(&record).map_err(|source| {
+            StateError::MalformedRecord {
+                path: record_path.clone(),
+                source,
+            }
+        })?;
+        atomic_write(&record_path, &body)?;
+        drop(lock);
+        Ok(())
+    }
+
     fn read_state(&self) -> Result<RepositoryState, StateError> {
         let path = self.state_path();
         let bytes = match std::fs::read(&path) {
@@ -927,6 +1026,44 @@ mod tests {
             .unwrap();
         assert!(matches!(replay, Completion::AlreadyComplete { .. }));
         assert_eq!(store.records("main").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delivery_state_updates_only_existing_records() {
+        let (_dir, store) = store();
+        store.seed_cursor("main", BASE).unwrap();
+        let range = admit_head(&store, "main", HEAD);
+        store
+            .complete(record_for("main", &range.base, &range.head))
+            .unwrap();
+        let pending = DeliveryState::advance(
+            None,
+            "2026-10-17T00:00:00.000Z".to_string(),
+            Some("HTTP 500".to_string()),
+        );
+        store
+            .update_delivery("main", HEAD, "bark", pending.clone())
+            .unwrap();
+        assert_eq!(
+            store.records("main").unwrap()[0].delivery["bark"],
+            pending,
+            "the failure state round-trips"
+        );
+        let delivered =
+            DeliveryState::advance(Some(&pending), "2026-10-17T00:01:00.000Z".to_string(), None);
+        store
+            .update_delivery("main", HEAD, "bark", delivered)
+            .unwrap();
+        let channel = &store.records("main").unwrap()[0].delivery["bark"];
+        assert_eq!(channel.attempts, 2);
+        assert!(channel.delivered());
+        assert_eq!(channel.last_error, None);
+        // A delivery update never invents a record, and the completion's
+        // other fields are untouched by the channel writes.
+        assert!(matches!(
+            store.update_delivery("main", NEXT, "bark", channel.clone()),
+            Err(StateError::RecordMissing { .. })
+        ));
     }
 
     #[test]

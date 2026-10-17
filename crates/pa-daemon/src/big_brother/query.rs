@@ -133,6 +133,10 @@ pub fn render_status(status: &RepositoryStatus) -> String {
                     conclusion
                 )
                 .expect("write to String");
+                if !record.delivery.is_empty() {
+                    writeln!(rendered, "      delivery: {}", render_delivery(record))
+                        .expect("write to String");
+                }
             }
         }
     }
@@ -164,10 +168,34 @@ fn first_line(text: &str) -> String {
     }
 }
 
+/// One record's per-channel delivery state (ADR 0029): what is
+/// delivered, what is still pending with its attempt count and last
+/// error.
+fn render_delivery(record: &ReviewRecord) -> String {
+    record
+        .delivery
+        .iter()
+        .map(|(channel, state)| {
+            if state.delivered() {
+                format!("{channel} delivered")
+            } else if let Some(error) = &state.last_error {
+                format!(
+                    "{channel} pending (attempt {}, last error: {})",
+                    state.attempts,
+                    first_line(error)
+                )
+            } else {
+                format!("{channel} pending (attempt {})", state.attempts)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::big_brother::state::{Admission, ReviewRecordLayer};
+    use crate::big_brother::state::{Admission, DeliveryState, ReviewRecordLayer};
     use std::collections::BTreeMap;
 
     const BASE: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -290,6 +318,52 @@ mod tests {
         assert!(
             !text.contains("no violations"),
             "only the synthesis first line renders: {text}"
+        );
+    }
+
+    #[test]
+    fn delivery_state_renders_per_channel() {
+        let (_dir, agent_dir, git_root, store) = enrolled_repo();
+        match store.admit("main", HEAD).unwrap() {
+            Admission::Admitted(range) => {
+                let mut completed = record(HEAD);
+                completed.base = range.base;
+                store.complete(completed).unwrap();
+            }
+            other => panic!("expected admission, got {other:?}"),
+        }
+        let mut delivered =
+            DeliveryState::advance(None, "2026-10-17T00:00:00.000Z".to_string(), None);
+        delivered.delivered_at = Some("2026-10-17T00:00:01.000Z".to_string());
+        store
+            .update_delivery("main", HEAD, "commit-status", delivered)
+            .unwrap();
+        let error_text = "bark POST returned 500 Internal Server Error: upstream down";
+        store
+            .update_delivery(
+                "main",
+                HEAD,
+                "bark",
+                DeliveryState::advance(
+                    None,
+                    "2026-10-17T00:00:00.000Z".to_string(),
+                    Some(error_text.to_string()),
+                ),
+            )
+            .unwrap();
+        let status = load_repository_status(&QueryOptions {
+            agent_dir,
+            repo: git_root,
+        })
+        .unwrap();
+        let text = render_status(&status);
+        // The map renders in its (sorted) channel order.
+        assert!(
+            text.contains(&format!(
+                "delivery: bark pending (attempt 1, last error: {}), commit-status delivered",
+                first_line(error_text)
+            )),
+            "{text}"
         );
     }
 

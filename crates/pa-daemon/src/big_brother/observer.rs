@@ -16,6 +16,7 @@ use anyhow::{anyhow, Context as _, Result};
 use serde_json::{json, Value};
 
 use crate::big_brother::client::{session_id, DaemonClient};
+use crate::big_brother::delivery::{deliver_pending, DeliveryChannels};
 use crate::big_brother::git::branch_head;
 use crate::big_brother::harvest::{harvest_review, last_assistant_text};
 use crate::big_brother::profile::ReviewProfile;
@@ -68,6 +69,9 @@ async fn scan_once(
     let repos_root = options.agent_dir.join("big-brother").join("repos");
     let entries = std::fs::read_dir(&repos_root)
         .with_context(|| format!("reading enrolled repositories at {}", repos_root.display()))?;
+    // Delivery channels resolve once per scan (ADR 0029): an absent key
+    // disables its channel for the whole pass.
+    let channels = DeliveryChannels::from_env();
     let mut client: Option<DaemonClient> = None;
     for entry in entries {
         let Ok(entry) = entry else { continue };
@@ -75,7 +79,14 @@ async fn scan_once(
         if !repo_dir.join("state.json").is_file() {
             continue;
         }
-        let result = observe_repo(&mut client, &options.socket_path, &repo_dir, woken).await;
+        let result = observe_repo(
+            &mut client,
+            &options.socket_path,
+            &repo_dir,
+            woken,
+            &channels,
+        )
+        .await;
         if let Err(error) = result {
             eprintln!(
                 "big-brother observer: repository {} failed: {error:#}",
@@ -94,6 +105,7 @@ async fn observe_repo(
     socket_path: &Path,
     repo_dir: &Path,
     woken: &mut BTreeSet<(String, String)>,
+    channels: &DeliveryChannels,
 ) -> Result<()> {
     let state: RepositoryState = read_state(repo_dir)?;
     let Some(git_root) = state.git_root.clone() else {
@@ -153,6 +165,12 @@ async fn observe_repo(
             | Admission::Busy { .. } => {}
         }
     }
+
+    // Delivery (ADR 0029): the record is the common source; every
+    // enabled channel retries from the scan until delivered. The pass
+    // runs after observation, so a record completed this scan delivers
+    // in the same one.
+    deliver_pending(&store, channels, &git_root).await?;
     Ok(())
 }
 

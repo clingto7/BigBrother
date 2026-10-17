@@ -13,6 +13,10 @@ pa-ai = { path = "../pa-ai" }
 pa-telemetry = { path = "../pa-telemetry" }
 anyhow = { workspace = true }
 futures = { workspace = true }
+# Delivery channels (big_brother/delivery.rs): the same reqwest the
+# sibling crates already carry — JSON bodies over HTTPS to GitHub and
+# Bark (ADR 0029). No new entry in the workspace graph.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
