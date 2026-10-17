@@ -241,6 +241,9 @@ async fn send_commit_status(
     let response = http
         .post(&url)
         .bearer_auth(&config.token)
+        // GitHub rejects UA-less requests with a 403 by administrative
+        // rule; reqwest sends no default User-Agent.
+        .header("User-Agent", delivery_user_agent())
         .header("Accept", "application/vnd.github+json")
         .json(&status_payload(record))
         .send()
@@ -268,6 +271,7 @@ async fn send_bark(
     let url = format!("{}/{}", config.server.trim_end_matches('/'), config.key);
     let response = http
         .post(&url)
+        .header("User-Agent", delivery_user_agent())
         .json(&bark_payload(repo_name, record))
         .send()
         .await
@@ -286,6 +290,11 @@ async fn send_bark(
         );
     }
     Ok(())
+}
+
+/// The sender's identity on delivery requests (GitHub requires one).
+fn delivery_user_agent() -> &'static str {
+    concat!("big-brother/", env!("CARGO_PKG_VERSION"))
 }
 
 /// The synthesis's first non-empty line, or the neutral fallback when

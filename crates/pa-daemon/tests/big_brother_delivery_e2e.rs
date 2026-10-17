@@ -46,6 +46,7 @@ struct RecordedRequest {
     method: String,
     path: String,
     authorization: Option<String>,
+    user_agent: Option<String>,
     body: Value,
 }
 
@@ -70,6 +71,7 @@ fn serve_one(
     }
     let mut content_length = 0usize;
     let mut authorization = None;
+    let mut user_agent = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -82,10 +84,17 @@ fn serve_one(
         if let Some(value) = lower.strip_prefix("content-length:") {
             content_length = value.trim().parse().unwrap_or_default();
         }
-        if lower.starts_with("authorization:") {
-            authorization = line
-                .split_once(':')
-                .map(|(_, value)| value.trim().to_string());
+        let header = |name: &str| {
+            lower.strip_prefix(&format!("{name}:")).map(|_| {
+                line.split_once(':')
+                    .map_or(String::new(), |(_, value)| value.trim().to_string())
+            })
+        };
+        if let Some(value) = header("authorization") {
+            authorization = Some(value);
+        }
+        if let Some(value) = header("user-agent") {
+            user_agent = Some(value);
         }
     }
     let mut body = vec![0; content_length];
@@ -96,11 +105,13 @@ fn serve_one(
         method,
         path,
         authorization,
+        user_agent,
         body: parsed,
     });
     let reason = match status {
         200 => "OK",
         201 => "Created",
+        403 => "Forbidden",
         _ => "Internal Server Error",
     };
     write!(
@@ -126,6 +137,13 @@ fn spawn_github_mock() -> (String, Requests) {
             let recorded = Arc::clone(&recorded);
             std::thread::spawn(move || {
                 let _ = serve_one(stream, |request| {
+                    // The real API rejects UA-less requests with a 403
+                    // by administrative rule (the smoke's finding); the
+                    // mock must enforce the same contract or a dropped
+                    // User-Agent header passes silently.
+                    if request.user_agent.is_none() {
+                        return (403, "{\"message\": \"User-Agent required\"}".to_string());
+                    }
                     recorded.lock().expect("github mock lock").push(request);
                     (201, "{\"state\": \"success\"}".to_string())
                 });
