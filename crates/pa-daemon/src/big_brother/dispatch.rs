@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use serde_json::Value;
 
 use crate::big_brother::profile::ReviewProfile;
@@ -72,16 +73,40 @@ pub(crate) fn dispatch_review_tool(
                 // reuses the layer (name reservation would refuse the
                 // same name), and the observer matches the exact
                 // in-flight range — a stale child never answers for it.
-                let handle = children
-                    .spawn(RlmSpawnRequest {
-                        prompt: format!("Review {layer} for {base}..{head}"),
-                        name: Some(format!("{layer}-{head}")),
-                        model: Some(model.to_string()),
-                        thinking: None,
-                        spawned_by_request_id: None,
-                        cell_source_code: None,
-                    })
-                    .await?;
+                let child_name = format!("{layer}-{head}");
+                let spawn_request = || RlmSpawnRequest {
+                    prompt: format!("Review {layer} for {base}..{head}"),
+                    name: Some(child_name.clone()),
+                    model: Some(model.to_string()),
+                    thinking: None,
+                    spawned_by_request_id: None,
+                    cell_source_code: None,
+                };
+                let handle = match children.spawn(spawn_request()).await {
+                    Ok(handle) => handle,
+                    Err(first) => {
+                        // A retry's fresh dispatch reuses the
+                        // `<layer>-<head>` name (ADR 0028); the cancelled
+                        // prior attempt's dead reviewer record must not
+                        // hold it forever. Retire the dead name and spawn
+                        // again — a LIVE same-name child still refuses
+                        // (the running verdict).
+                        let verdict = children.retire_dead_child_name(&child_name).await;
+                        match verdict {
+                            Ok("deleted") => children.spawn(spawn_request()).await
+                                .with_context(|| {
+                                    format!(
+                                        "re-spawning reviewer {child_name} after retiring its dead record (first spawn: {first:#})"
+                                    )
+                                })?,
+                            other => {
+                                return Err(anyhow::anyhow!(
+                                    "spawning the review child (name retire verdict {other:?}): {first:#}"
+                                ));
+                            }
+                        }
+                    }
+                };
                 Ok(ToolExecutionResult::text(format!(
                     "layer {layer} reviewer spawned as child {} for {base}..{head}",
                     handle.rlm_child_id

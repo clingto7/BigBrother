@@ -60,11 +60,18 @@ pub struct BranchState {
     /// head waits until this range completes; it never preempts.
     #[serde(default)]
     pub in_flight: Option<ReviewRange>,
+    /// The most recent range that exhausted its attempts (ADR 0028):
+    /// `None` until a range fails loudly. The cursor never moved past it,
+    /// so a later range re-covers its commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<ReviewFailure>,
     #[serde(default)]
     pub updated_at: String,
 }
 
-/// One admitted Review range (ADR 0018): immutable once admitted.
+/// One admitted Review range (ADR 0018): immutable once admitted, except
+/// its attempt supervision fields (ADR 0028), which advance as timed-out
+/// attempts are cancelled and re-armed.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewRange {
@@ -72,6 +79,34 @@ pub struct ReviewRange {
     pub head: String,
     #[serde(default)]
     pub admitted_at: String,
+    /// The attempts spent so far, the current one included (ADR 0028);
+    /// documents from before attempt supervision load as attempt 1.
+    #[serde(default = "default_attempts")]
+    pub attempts: u32,
+    /// When the current attempt started (ADR 0028); empty on legacy
+    /// documents, where the admission time is the first attempt's start.
+    #[serde(default)]
+    pub attempt_started_at: String,
+}
+
+/// The pre-supervision attempt count: every legacy in-flight range is on
+/// its first attempt.
+fn default_attempts() -> u32 {
+    1
+}
+
+/// A range that exhausted its attempts (ADR 0028): the loud failure the
+/// query surface shows, kept beside the branch state — the cursor never
+/// moves past an unreviewed change.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFailure {
+    pub base: String,
+    pub head: String,
+    pub attempts: u32,
+    /// The explicit failure reason (ADR 0017's `timed_out`).
+    pub reason: String,
+    pub failed_at: String,
 }
 
 /// The outcome of admitting an observed head for one branch.
@@ -108,6 +143,10 @@ pub struct ReviewRecord {
     pub branch: String,
     pub base: String,
     pub head: String,
+    /// The attempts this review consumed, the completing one included
+    /// (ADR 0028); records from before attempt supervision load as 1.
+    #[serde(default = "default_attempts")]
+    pub attempts: u32,
     #[serde(default)]
     pub completed_at: String,
     /// The per-layer child results, as dispatched by the review profile.
@@ -180,6 +219,15 @@ pub enum StateError {
     NotSeeded {
         /// The branch that was asked to admit a range.
         branch: String,
+    },
+    /// The requested attempt operation targets a range that is not the
+    /// branch's in-flight range (ADR 0028).
+    #[error("branch \"{branch}\" has no in-flight range at {head}")]
+    RangeNotInFlight {
+        /// The branch that was asked for an attempt transition.
+        branch: String,
+        /// The range head that did not match.
+        head: String,
     },
     /// The branch's cursor was already seeded to another revision.
     #[error("branch \"{branch}\" cursor is already {cursor}; refusing to reseed to {requested}")]
@@ -414,12 +462,105 @@ impl RepositoryStateStore {
             base,
             head: head.to_string(),
             admitted_at: crate::util::now_iso(),
+            attempts: 1,
+            attempt_started_at: crate::util::now_iso(),
         };
         branch_state.in_flight = Some(range.clone());
         branch_state.updated_at = crate::util::now_iso();
         self.write_state(&state)?;
         drop(lock);
         Ok(Admission::Admitted(range))
+    }
+
+    /// Re-arm the in-flight range after a cancelled attempt (ADR 0028):
+    /// the attempt count advances and the new attempt's start stamps now.
+    /// A retry is a new attempt with the same input identity — the range
+    /// itself never changes.
+    ///
+    /// # Errors
+    ///
+    /// Loud when the branch's in-flight range is not this head.
+    pub fn retry_attempt(&self, branch: &str, head: &str) -> Result<u32, StateError> {
+        let lock = self.acquire_lock()?;
+        let mut state = self.read_state()?;
+        let branch_state =
+            state
+                .branches
+                .get_mut(branch)
+                .ok_or_else(|| StateError::RangeNotInFlight {
+                    branch: branch.to_string(),
+                    head: head.to_string(),
+                })?;
+        let in_flight =
+            branch_state
+                .in_flight
+                .as_mut()
+                .ok_or_else(|| StateError::RangeNotInFlight {
+                    branch: branch.to_string(),
+                    head: head.to_string(),
+                })?;
+        if in_flight.head != head {
+            return Err(StateError::RangeNotInFlight {
+                branch: branch.to_string(),
+                head: head.to_string(),
+            });
+        }
+        in_flight.attempts += 1;
+        in_flight.attempt_started_at = crate::util::now_iso();
+        let attempts = in_flight.attempts;
+        branch_state.updated_at = crate::util::now_iso();
+        self.write_state(&state)?;
+        drop(lock);
+        Ok(attempts)
+    }
+
+    /// Fail the in-flight range loudly (ADR 0028): the slot clears, the
+    /// failure records on the branch with its attempt count and reason,
+    /// and the cursor does not move — an unreviewed change is never
+    /// swallowed as reviewed. The next admitted head starts from the same
+    /// base, re-covering the failed commits.
+    ///
+    /// # Errors
+    ///
+    /// Loud when the branch's in-flight range is not this head.
+    pub fn fail_range(&self, branch: &str, head: &str, reason: &str) -> Result<(), StateError> {
+        let lock = self.acquire_lock()?;
+        let mut state = self.read_state()?;
+        let branch_state =
+            state
+                .branches
+                .get_mut(branch)
+                .ok_or_else(|| StateError::RangeNotInFlight {
+                    branch: branch.to_string(),
+                    head: head.to_string(),
+                })?;
+        let in_flight =
+            branch_state
+                .in_flight
+                .take()
+                .ok_or_else(|| StateError::RangeNotInFlight {
+                    branch: branch.to_string(),
+                    head: head.to_string(),
+                })?;
+        if in_flight.head != head {
+            // Put the range back: this failure targeted the wrong head.
+            branch_state.in_flight = Some(in_flight);
+            return Err(StateError::RangeNotInFlight {
+                branch: branch.to_string(),
+                head: head.to_string(),
+            });
+        }
+        branch_state.last_failure = Some(ReviewFailure {
+            base: in_flight.base,
+            head: in_flight.head,
+            attempts: in_flight.attempts,
+            reason: reason.to_string(),
+            failed_at: crate::util::now_iso(),
+        });
+        branch_state.updated_at = crate::util::now_iso();
+        self.write_state(&state)?;
+        drop(lock);
+        Ok(())
     }
 
     /// Complete a range: persist the record (before any delivery, ADR
@@ -663,6 +804,7 @@ mod tests {
             branch: branch.to_string(),
             base: base.to_string(),
             head: head.to_string(),
+            attempts: 1,
             completed_at: crate::util::now_iso(),
             layers: vec![ReviewRecordLayer {
                 layer: "requirements".to_string(),
@@ -855,5 +997,92 @@ mod tests {
                 .contains("unsupported repository state version"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn attempt_transitions_advance_and_fail_loudly() {
+        let (_dir, store) = store();
+        store.seed_cursor("main", BASE).unwrap();
+        let range = admit_head(&store, "main", HEAD);
+        assert_eq!(range.attempts, 1);
+        assert!(!range.attempt_started_at.is_empty());
+        // A cancelled attempt re-arms the same range: attempts advance,
+        // the range identity does not change.
+        assert_eq!(store.retry_attempt("main", HEAD).unwrap(), 2);
+        let rearmed = store.load().unwrap().branches["main"].in_flight.clone();
+        assert_eq!(
+            rearmed,
+            Some(ReviewRange {
+                attempts: 2,
+                attempt_started_at: rearmed.as_ref().unwrap().attempt_started_at.clone(),
+                ..range
+            })
+        );
+        // A wrong head never re-arms or fails anything.
+        assert!(matches!(
+            store.retry_attempt("main", NEXT),
+            Err(StateError::RangeNotInFlight { .. })
+        ));
+        // Exhausting the ceiling fails the range: the slot clears, the
+        // cursor stays, the failure records with its count and reason.
+        store.fail_range("main", HEAD, "timed_out").unwrap();
+        let state = store.load().unwrap();
+        let branch = &state.branches["main"];
+        assert!(branch.in_flight.is_none());
+        assert_eq!(branch.cursor.as_deref(), Some(BASE));
+        let failure = branch.last_failure.as_ref().unwrap();
+        assert_eq!((failure.base.as_str(), failure.head.as_str()), (BASE, HEAD));
+        assert_eq!(failure.attempts, 2);
+        assert_eq!(failure.reason, "timed_out");
+        // The next head admits from the same base, re-covering the failed
+        // commits.
+        let next = admit_head(&store, "main", NEXT);
+        assert_eq!(next.base, BASE);
+        assert!(matches!(
+            store.fail_range("main", HEAD, "timed_out"),
+            Err(StateError::RangeNotInFlight { .. })
+        ));
+    }
+
+    #[test]
+    fn legacy_documents_load_as_first_attempt() {
+        let (dir, store) = store();
+        // A pre-supervision state document: no attempt fields anywhere.
+        let state_path = crate::big_brother::profile::repo_dir(
+            &dir.path().join("agent"),
+            &dir.path().join("watched"),
+        )
+        .join("state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &state_path,
+            serde_json::json!({
+                "version": 1,
+                "branches": { "main": { "cursor": BASE,
+                    "inFlight": { "base": BASE, "head": HEAD,
+                        "admittedAt": "2026-10-14T00:00:00.000Z" } } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let state = store.load().unwrap();
+        let range = state.branches["main"].in_flight.as_ref().unwrap();
+        assert_eq!(range.attempts, 1);
+        assert_eq!(range.attempt_started_at, "");
+        assert_eq!(range.admitted_at, "2026-10-14T00:00:00.000Z");
+        // A legacy record also loads with its implicit single attempt.
+        let record_dir = state_path.parent().unwrap().join("records").join("main");
+        std::fs::create_dir_all(&record_dir).unwrap();
+        std::fs::write(
+            record_dir.join(format!("{HEAD}.json")),
+            serde_json::json!({
+                "version": 1, "branch": "main", "base": BASE, "head": HEAD,
+                "layers": [], "conclusion": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let records = store.records("main").unwrap();
+        assert_eq!(records[0].attempts, 1);
     }
 }

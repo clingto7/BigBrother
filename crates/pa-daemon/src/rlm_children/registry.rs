@@ -95,6 +95,55 @@ impl SupervisorChildSessionsInner {
         false
     }
 
+    /// Retire one dead child's name reservation (ADR 0028's retry path):
+    /// the cancelled prior attempt's reviewer is gone — killed with its
+    /// worker, settled by the ledger reseed — but its live ledger edge
+    /// keeps the `<layer>-<head>` name reserved against the retry's fresh
+    /// dispatch. Tombstones the edge and drops the registry record, so
+    /// the name spawns cleanly; unlike
+    /// [`Self::delete_inactive_subagent`] this kills nothing (the child's
+    /// worker is long gone). `"running"` refuses for a child that still
+    /// runs; `"not_found"` when nothing holds the name.
+    pub(super) async fn retire_dead_child_name(&self, name: &str) -> Result<&'static str> {
+        let Some(record) = self.find_record(name).await else {
+            return Ok("not_found");
+        };
+        let (running, child_id, child_file) = {
+            let record = record.lock().await;
+            (
+                record.settled_status.is_none(),
+                record.rlm_child_id.clone(),
+                record.session_file.clone(),
+            )
+        };
+        if running {
+            return Ok("running");
+        }
+        if let Some(child_file) = child_file {
+            let sessions_dir = crate::descriptor::load_supervisor_config(
+                &crate::descriptor::descriptor_dir(&self.agent_dir, self.link.socket_path())
+                    .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
+                self.link.socket_path(),
+            )
+            .and_then(|config| config.default_session_dir);
+            let ledger = crate::rlm_ledger::RlmSpawnLedger::new(
+                &self.agent_dir,
+                Path::new(&sessions_dir.unwrap_or_default()),
+                |_| {},
+            );
+            ledger.append_delete(
+                &child_id,
+                &child_file,
+                crate::rlm_ledger::RlmLedgerDeleteReason::ParentTeardown,
+            )?;
+        }
+        self.children
+            .lock()
+            .await
+            .retain(|candidate| !Arc::ptr_eq(candidate, &record));
+        Ok("deleted")
+    }
+
     /// Delete one inactive child by id: refresh the registry row first, refuse one still in flight,
     /// and tear a settled one down with its ledger tombstone (same as `rlm.delete_subagent`).
     pub(super) async fn delete_inactive_subagent(&self, child_id: &str) -> Result<&'static str> {

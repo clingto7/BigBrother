@@ -36,8 +36,16 @@ async fn init_command(mut args: std::iter::Skip<std::env::Args>) -> Result<()> {
     let mut session_name = None;
     let mut main_model = None;
     let mut layers = Vec::new();
+    let mut attempt_timeout_seconds = None;
+    let mut max_attempts = None;
     let next_value = |flag: &str, args: &mut std::iter::Skip<std::env::Args>| -> Result<String> {
         args.next().ok_or_else(|| anyhow!("--{flag} needs a value"))
+    };
+    let next_u32 = |flag: &str, args: &mut std::iter::Skip<std::env::Args>| -> Result<u32> {
+        let value = next_value(flag, args)?;
+        value
+            .parse()
+            .map_err(|_| anyhow!("--{flag} expects a positive integer, got {value}"))
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -47,6 +55,12 @@ async fn init_command(mut args: std::iter::Skip<std::env::Args>) -> Result<()> {
             "--branch" => branch = Some(next_value("branch", &mut args)?),
             "--session-name" => session_name = Some(next_value("session-name", &mut args)?),
             "--main-model" => main_model = Some(next_value("main-model", &mut args)?),
+            "--attempt-timeout-secs" => {
+                attempt_timeout_seconds = Some(next_u32("attempt-timeout-secs", &mut args)?);
+            }
+            "--max-attempts" => {
+                max_attempts = Some(next_u32("max-attempts", &mut args)?);
+            }
             "--layer" => {
                 let value = next_value("layer", &mut args)?;
                 let (name, model) = value
@@ -68,6 +82,8 @@ async fn init_command(mut args: std::iter::Skip<std::env::Args>) -> Result<()> {
         session_name,
         main_model,
         layers,
+        attempt_timeout_seconds,
+        max_attempts,
     };
     let outcome = pa_daemon::big_brother::init::run_init(options).await?;
     println!(

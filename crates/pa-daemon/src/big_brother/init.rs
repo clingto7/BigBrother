@@ -45,6 +45,12 @@ pub struct InitOptions {
     /// Explicit layer assignments (`name=model`): each replaces the
     /// same-named default layer or appends a new one.
     pub layers: Vec<(String, String)>,
+    /// One attempt's time budget in seconds (ADR 0028) written into a
+    /// fresh profile; a present profile already owns it.
+    pub attempt_timeout_seconds: Option<u32>,
+    /// The attempt ceiling for one range (ADR 0028) written into a fresh
+    /// profile; a present profile already owns it.
+    pub max_attempts: Option<u32>,
 }
 
 /// What one enrollment run established.
@@ -222,6 +228,8 @@ fn build_profile(options: &InitOptions, git_root: &Path) -> Result<ReviewProfile
         session_name,
         main_model: Some(main_model.to_string()),
         layers,
+        attempt_timeout_seconds: options.attempt_timeout_seconds,
+        max_attempts: options.max_attempts,
     })
 }
 
@@ -275,6 +283,8 @@ mod tests {
             session_name: None,
             main_model: Some("prime-inference/main".to_string()),
             layers: Vec::new(),
+            attempt_timeout_seconds: None,
+            max_attempts: None,
         }
     }
 

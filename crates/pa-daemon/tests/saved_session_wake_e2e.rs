@@ -641,6 +641,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         branch: branch.clone(),
         base: harvested.base,
         head: harvested.head,
+        attempts: 1,
         completed_at: String::new(),
         layers: harvested
             .layers

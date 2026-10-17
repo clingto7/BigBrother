@@ -38,6 +38,7 @@ fn enrolled_repository() -> (tempfile::TempDir, PathBuf, PathBuf) {
             branch: "main".to_string(),
             base: range.base,
             head: HEAD.to_string(),
+            attempts: 1,
             completed_at: String::new(),
             layers: vec![ReviewRecordLayer {
                 layer: "requirements".to_string(),

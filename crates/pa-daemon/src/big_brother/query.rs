@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-use crate::big_brother::state::{RepositoryStateStore, ReviewRange, ReviewRecord};
+use crate::big_brother::state::{RepositoryStateStore, ReviewFailure, ReviewRange, ReviewRecord};
 
 /// The query command's runtime options.
 #[derive(Debug, Clone)]
@@ -30,6 +30,8 @@ pub struct BranchStatus {
     pub cursor: Option<String>,
     /// The admitted, not-yet-completed range (ADR 0018).
     pub in_flight: Option<ReviewRange>,
+    /// The most recent range that exhausted its attempts (ADR 0028).
+    pub last_failure: Option<ReviewFailure>,
     /// The completed review records, oldest first.
     pub records: Vec<ReviewRecord>,
 }
@@ -73,6 +75,7 @@ pub fn load_repository_status(options: &QueryOptions) -> Result<RepositoryStatus
             name,
             cursor: branch_state.cursor,
             in_flight: branch_state.in_flight,
+            last_failure: branch_state.last_failure,
             records,
         });
     }
@@ -92,13 +95,26 @@ pub fn render_status(status: &RepositoryStatus) -> String {
         writeln!(rendered, "  {cursor}").expect("write to String");
         let in_flight = match &branch.in_flight {
             Some(range) => format!(
-                "review in flight: {}..{}",
+                "review in flight: {}..{} (attempt {})",
                 short_revision(&range.base),
-                short_revision(&range.head)
+                short_revision(&range.head),
+                range.attempts
             ),
             None => "no review in flight".to_string(),
         };
         writeln!(rendered, "  {in_flight}").expect("write to String");
+        if let Some(failure) = &branch.last_failure {
+            writeln!(
+                rendered,
+                "  last review failed: {}..{} after {} attempt(s) ({}) at {}; a later range re-covers it",
+                short_revision(&failure.base),
+                short_revision(&failure.head),
+                failure.attempts,
+                failure.reason,
+                failure.failed_at
+            )
+            .expect("write to String");
+        }
         if branch.records.is_empty() {
             writeln!(rendered, "  no completed reviews").expect("write to String");
         } else {
@@ -173,6 +189,7 @@ mod tests {
             branch: "main".to_string(),
             base: BASE.to_string(),
             head: head.to_string(),
+            attempts: 1,
             completed_at: "2026-10-14T00:00:00Z".to_string(),
             layers: vec![ReviewRecordLayer {
                 layer: "requirements".to_string(),
@@ -247,6 +264,13 @@ mod tests {
                 .into_iter()
                 .map(|(name, branch_state)| BranchStatus {
                     records: store.records(&name).unwrap(),
+                    last_failure: Some(ReviewFailure {
+                        base: BASE.to_string(),
+                        head: "aaaabbbbccccddddaaaabbbbccccddddaaaabbbb".to_string(),
+                        attempts: 2,
+                        reason: "timed_out".to_string(),
+                        failed_at: "2026-10-14T00:00:00Z".to_string(),
+                    }),
                     name,
                     cursor: branch_state.cursor,
                     in_flight: branch_state.in_flight,
@@ -258,6 +282,11 @@ mod tests {
         assert!(text.contains("reviewed through 89abcdef0123…"), "{text}");
         assert!(text.contains("1 completed review(s)"), "{text}");
         assert!(text.contains("clean range"), "{text}");
+        assert!(
+            text.contains("last review failed: 0123456789ab") && text.contains("..aaaabbbbcccc"),
+            "{text}"
+        );
+        assert!(text.contains("after 2 attempt(s) (timed_out)"), "{text}");
         assert!(
             !text.contains("no violations"),
             "only the synthesis first line renders: {text}"

@@ -278,6 +278,8 @@ fn init_options(socket: &Path, agent_dir: &Path, repo: &Path) -> InitOptions {
         session_name: None,
         main_model: Some("prime-inference/main".to_string()),
         layers: Vec::new(),
+        attempt_timeout_seconds: None,
+        max_attempts: None,
     }
 }
 

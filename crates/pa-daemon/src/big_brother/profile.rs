@@ -28,7 +28,23 @@ pub struct ReviewProfile {
     /// The review layers (ADR 0019): each a distinct child-agent role
     /// with its own model, dispatched per review range.
     pub layers: Vec<ReviewLayer>,
+    /// One attempt's total time budget in seconds (ADR 0028); `None` is
+    /// the default (1800). A stalled conversation is cancelled and
+    /// re-attempted when the budget expires — never waited on forever.
+    #[serde(default)]
+    pub attempt_timeout_seconds: Option<u32>,
+    /// The attempt ceiling for one range (ADR 0028, first attempt
+    /// included); `None` is the default (3). At the ceiling the range
+    /// fails loudly instead of retrying.
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
 }
+
+/// The default attempt budget (ADR 0028): 30 minutes.
+const DEFAULT_ATTEMPT_TIMEOUT_SECONDS: u32 = 1800;
+/// The default attempt ceiling (ADR 0028): the first attempt plus two
+/// retries.
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 
 /// One review layer's child configuration.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -81,6 +97,22 @@ impl ReviewProfile {
             .map(|candidate| candidate.model.as_str())
     }
 
+    /// One attempt's total time budget (ADR 0028).
+    #[must_use]
+    pub fn attempt_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(
+            self.attempt_timeout_seconds
+                .unwrap_or(DEFAULT_ATTEMPT_TIMEOUT_SECONDS),
+        ))
+    }
+
+    /// The attempt ceiling for one range, first attempt included (ADR
+    /// 0028).
+    #[must_use]
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS)
+    }
+
     /// Validate the schema invariants: known version, a non-empty wake
     /// name, and at least one uniquely named layer whose names and model
     /// selectors are non-empty.
@@ -105,6 +137,14 @@ impl ReviewProfile {
             return Err(invalid(
                 "layers must contain at least one review layer".to_string(),
             ));
+        }
+        if self.attempt_timeout_seconds == Some(0) {
+            return Err(invalid(
+                "attemptTimeoutSeconds must be greater than zero".to_string(),
+            ));
+        }
+        if self.max_attempts == Some(0) {
+            return Err(invalid("maxAttempts must be at least 1".to_string()));
         }
         let mut seen = std::collections::BTreeSet::new();
         for layer in &self.layers {
@@ -352,5 +392,56 @@ mod tests {
             error.to_string().contains("malformed review profile"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn attempt_supervision_defaults_and_overrides() {
+        let (dir, git_root) = temp_repo();
+        let agent_dir = dir.path().join("agent");
+        write_profile(&agent_dir, &git_root, &valid_profile_body());
+        let defaults = resolve_profile(&agent_dir, &git_root)
+            .unwrap()
+            .expect("profile");
+        assert_eq!(
+            defaults.attempt_timeout(),
+            std::time::Duration::from_secs(1800)
+        );
+        assert_eq!(defaults.max_attempts(), 3);
+        let body = serde_json::json!({
+            "version": 1, "sessionName": "s",
+            "attemptTimeoutSeconds": 5, "maxAttempts": 1,
+            "layers": [{ "name": "l", "model": "m" }]
+        })
+        .to_string();
+        write_profile(&agent_dir, &git_root, &body);
+        let tuned = resolve_profile(&agent_dir, &git_root)
+            .unwrap()
+            .expect("profile");
+        assert_eq!(tuned.attempt_timeout(), std::time::Duration::from_secs(5));
+        assert_eq!(tuned.max_attempts(), 1);
+        // Zero values are loud, not silent defaults.
+        for (field, zeroed) in [
+            (
+                "attemptTimeoutSeconds",
+                serde_json::json!({
+                    "version": 1, "sessionName": "s", "attemptTimeoutSeconds": 0,
+                    "layers": [{ "name": "l", "model": "m" }]
+                }),
+            ),
+            (
+                "maxAttempts",
+                serde_json::json!({
+                    "version": 1, "sessionName": "s", "maxAttempts": 0,
+                    "layers": [{ "name": "l", "model": "m" }]
+                }),
+            ),
+        ] {
+            write_profile(&agent_dir, &git_root, &zeroed.to_string());
+            let error = resolve_profile(&agent_dir, &git_root).unwrap_err();
+            assert!(
+                error.to_string().contains(field),
+                "expected {field} violation in: {error}"
+            );
+        }
     }
 }

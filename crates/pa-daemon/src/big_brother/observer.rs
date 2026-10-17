@@ -115,11 +115,17 @@ async fn observe_repo(
     );
     let client = ensure_client(client, socket_path).await?;
 
-    // An in-flight range completes before a newer head admits (ADR 0018).
+    // An in-flight range completes before a newer head admits (ADR 0018),
+    // under its attempt budget (ADR 0028): a stalled conversation is
+    // cancelled and re-attempted, never waited on forever.
     for (branch, branch_state) in &state.branches {
         let Some(in_flight) = branch_state.in_flight.clone() else {
             continue;
         };
+        if attempt_expired(&profile, &in_flight) {
+            supervise_timeout(client, &store, &profile, branch, &in_flight, woken).await?;
+            return Ok(());
+        }
         let completed =
             try_complete_review(client, &store, &profile, branch, &in_flight, woken).await?;
         if !completed {
@@ -138,7 +144,8 @@ async fn observe_repo(
                     "big-brother observer: admitted {}..{head} on {branch}",
                     range.base
                 );
-                wake_conductor(client, &profile.session_name, &range).await?;
+                let message = wake_message(&range, profile.max_attempts());
+                wake_conductor(client, &profile.session_name, message).await?;
                 woken.insert((profile.session_name.clone(), head));
             }
             Admission::AlreadyReviewed { .. }
@@ -167,14 +174,20 @@ async fn try_complete_review(
         .find(|row| row.get("sessionName").and_then(Value::as_str) == Some(&profile.session_name))
     else {
         // The conductor is not resident (a daemon restart before or
-        // during the review). A wake this process has not yet issued is
-        // the retry; one it has means the turn is still spinning up.
+        // during the review, or a cancelled attempt's kill). A wake this
+        // process has not yet issued for the CURRENT attempt is the
+        // retry; one it has means the turn is still spinning up. A
+        // refused wake gives the quota back, so the next scan retries it.
         if woken.insert((profile.session_name.clone(), in_flight.head.clone())) {
             eprintln!(
-                "big-brother observer: re-waking {} for a recovered in-flight range",
-                profile.session_name
+                "big-brother observer: re-waking {} for a recovered in-flight range (attempt {})",
+                profile.session_name, in_flight.attempts
             );
-            wake_conductor(client, &profile.session_name, in_flight).await?;
+            let message = wake_message(in_flight, profile.max_attempts());
+            if let Err(error) = wake_conductor(client, &profile.session_name, message).await {
+                woken.remove(&(profile.session_name.clone(), in_flight.head.clone()));
+                return Err(error);
+            }
         }
         return Ok(false);
     };
@@ -219,6 +232,7 @@ async fn try_complete_review(
         branch: branch.to_string(),
         base: harvested.base,
         head: harvested.head,
+        attempts: in_flight.attempts,
         completed_at: String::new(),
         layers: harvested
             .layers
@@ -245,17 +259,143 @@ async fn try_complete_review(
     Ok(true)
 }
 
-/// Wake (or message) the review conductor for one admitted range.
+/// Whether the range's current attempt has exhausted its budget (ADR
+/// 0028). A legacy document without an attempt stamp times out from its
+/// admission; an unparseable stamp never times out (corrupt state is
+/// loud elsewhere, a silent mis-timed cancellation is worse).
+fn attempt_expired(profile: &ReviewProfile, range: &ReviewRange) -> bool {
+    let started = if range.attempt_started_at.is_empty() {
+        range.admitted_at.as_str()
+    } else {
+        range.attempt_started_at.as_str()
+    };
+    let Some(started_ms) = crate::util::iso_to_unix_ms(started) else {
+        eprintln!(
+            "big-brother observer: attempt stamp \"{started}\" does not parse; not timing out"
+        );
+        return false;
+    };
+    crate::util::now_ms().saturating_sub(started_ms) >= profile.attempt_timeout().as_millis() as u64
+}
+
+/// A timed-out attempt (ADR 0028): cancel it — the conductor first, then
+/// every layer child (a dead conductor reacts to no child notices) —
+/// then either re-arm the range as a fresh attempt, or fail the range
+/// loudly at the attempt ceiling. The re-arm does NOT wake inline: a
+/// wake issued in the kill's shadow races the cancelled worker's session
+/// lease (the cold-wake spawn would be refused with nothing retrying
+/// it), so the re-arm only advances the state and hands the attempt's
+/// wake quota back — the next scan's recovery path wakes the conductor
+/// with the retry instruction, outside the race window.
+async fn supervise_timeout(
+    client: &mut DaemonClient,
+    store: &RepositoryStateStore,
+    profile: &ReviewProfile,
+    branch: &str,
+    in_flight: &ReviewRange,
+    woken: &mut BTreeSet<(String, String)>,
+) -> Result<()> {
+    eprintln!(
+        "big-brother observer: attempt {} of {}..{} on {branch} timed out",
+        in_flight.attempts, in_flight.base, in_flight.head
+    );
+    cancel_attempt(client, profile, in_flight).await;
+    if in_flight.attempts >= profile.max_attempts() {
+        store
+            .fail_range(branch, &in_flight.head, "timed_out")
+            .map_err(|error| anyhow!("failing the exhausted review range: {error}"))?;
+        eprintln!(
+            "big-brother observer: range {}..{} on {branch} failed after {} attempt(s); the cursor holds and a later range re-covers it",
+            in_flight.base, in_flight.head, in_flight.attempts
+        );
+        return Ok(());
+    }
+    store
+        .retry_attempt(branch, &in_flight.head)
+        .map_err(|error| anyhow!("re-arming the review attempt: {error}"))?;
+    woken.remove(&(profile.session_name.clone(), in_flight.head.clone()));
+    eprintln!(
+        "big-brother observer: re-armed {}..{} on {branch} as attempt {}",
+        in_flight.base,
+        in_flight.head,
+        in_flight.attempts + 1
+    );
+    Ok(())
+}
+
+/// Cancel one attempt (ADR 0028): kill the conductor first, then every
+/// configured layer's child. Best-effort by design — a kill that fails (a
+/// session already gone) logs and moves on; the attempt is abandoned
+/// either way, and a survivor child never answers for the retried range
+/// (the observer matches settled children by the exact in-flight head).
+async fn cancel_attempt(
+    client: &mut DaemonClient,
+    profile: &ReviewProfile,
+    in_flight: &ReviewRange,
+) {
+    let sessions = match client.list_sessions().await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            eprintln!("big-brother observer: listing sessions to cancel an attempt: {error:#}");
+            return;
+        }
+    };
+    let mut targets = vec![profile.session_name.clone()];
+    targets.extend(
+        profile
+            .layers
+            .iter()
+            .map(|layer| format!("{}-{}", layer.name, in_flight.head)),
+    );
+    for name in targets {
+        let Some(id) = sessions
+            .iter()
+            .find(|row| row.get("sessionName").and_then(Value::as_str) == Some(name.as_str()))
+            .and_then(|row| row.get("id").or_else(|| row.get("activeSessionId")))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        match client
+            .request(json!({ "type": "kill", "activeSessionId": id }))
+            .await
+        {
+            Ok(_) => eprintln!("big-brother observer: cancelled {name}"),
+            Err(error) => eprintln!("big-brother observer: cancelling {name}: {error:#}"),
+        }
+    }
+}
+
+/// The conductor's wake message for one attempt (ADR 0026's range shape;
+/// a retried attempt appends ADR 0028's explicit retry instruction — the
+/// cancelled attempt's answers died with its in-memory children, so the
+/// fresh attempt dispatches every layer anew).
+fn wake_message(range: &ReviewRange, max_attempts: u32) -> String {
+    if range.attempts > 1 {
+        format!(
+            "REVIEW_RANGE {}..{} END\n\
+             Retry attempt {} of {max_attempts}: the prior attempt timed out and its reviewers \
+             were cancelled. Dispatch every configured review layer fresh for this range, then \
+             synthesize once all layers have replied.",
+            range.base, range.head, range.attempts
+        )
+    } else {
+        format!("REVIEW_RANGE {}..{} END", range.base, range.head)
+    }
+}
+
+/// Wake (or message) the review conductor with one product-defined
+/// message (ADR 0026: the range wake, or its retry variant, ADR 0028).
 async fn wake_conductor(
     client: &mut DaemonClient,
     session_name: &str,
-    range: &ReviewRange,
+    message: String,
 ) -> Result<()> {
     client
         .request(json!({
             "type": "send_message",
             "targetActiveSessionId": session_name,
-            "message": format!("REVIEW_RANGE {}..{} END", range.base, range.head),
+            "message": message,
         }))
         .await
         .context("waking the review conductor")?;
