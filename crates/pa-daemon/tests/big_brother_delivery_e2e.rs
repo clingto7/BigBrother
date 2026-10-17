@@ -263,7 +263,7 @@ fn serve_review(mut stream: TcpStream) -> std::io::Result<()> {
             }
             None => vec![
                 chunk(
-                    &json!({"role": "assistant", "content": "review dispatched"}),
+                    &json!({"role": "assistant", "content": "REVIEW_SYNTHESIS\nall layers reviewed"}),
                     None,
                 ),
                 chunk(&json!({}), Some("stop")),
@@ -588,7 +588,7 @@ fn completed_records_deliver_to_commit_status_and_bark() {
     assert_eq!(status.authorization.as_deref(), Some("Bearer gh-e2e-token"));
     assert_eq!(status.body["state"], json!("success"));
     assert_eq!(status.body["context"], json!("big-brother/review"));
-    assert_eq!(status.body["description"], json!("review dispatched"));
+    assert_eq!(status.body["description"], json!("all layers reviewed"));
 
     // The Bark push: the key in the path, one synthesis line in the body.
     let pushes = bark_requests.lock().expect("bark lock").clone();
@@ -601,7 +601,7 @@ fn completed_records_deliver_to_commit_status_and_bark() {
     assert_eq!(
         push.body["body"],
         json!(format!(
-            "reviewed {}..{}: review dispatched",
+            "reviewed {}..{}: all layers reviewed",
             &base[..8],
             &head[..8]
         ))

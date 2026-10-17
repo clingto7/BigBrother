@@ -217,7 +217,7 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
         } else {
             vec![
                 chunk(
-                    &json!({"role": "assistant", "content": "review dispatched"}),
+                    &json!({"role": "assistant", "content": "REVIEW_SYNTHESIS\nall layers reviewed"}),
                     None,
                 ),
                 chunk(&json!({}), Some("stop")),
@@ -545,7 +545,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     assert_ne!(woken_id, active_id);
     let parent_messages = wait_until(Duration::from_secs(90), || {
         let text = messages(&mut client, "parent-messages", woken_id);
-        (text.contains("review dispatched") && text.matches("dispatch_review").count() >= 3)
+        (text.contains("all layers reviewed") && text.matches("dispatch_review").count() >= 3)
             .then_some(text)
     });
     assert!(
@@ -625,7 +625,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
         .expect("harvest the completed review");
     assert_eq!(harvested.base, base);
     assert_eq!(harvested.head, head);
-    assert_eq!(harvested.conclusion, "review dispatched");
+    assert_eq!(harvested.conclusion, "all layers reviewed");
     assert_eq!(harvested.layers.len(), 3);
     for layer in &harvested.layers {
         assert_eq!(layer.answer, format!("{} reviewed", layer.layer));
@@ -682,7 +682,10 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].head, head);
     assert_eq!(records[0].layers.len(), 3);
-    assert_eq!(records[0].conclusion.as_deref(), Some("review dispatched"));
+    assert_eq!(
+        records[0].conclusion.as_deref(),
+        Some("all layers reviewed")
+    );
     // The review ran exactly once; the exact main-model call count varies
     // with child settle notices triggering follow-up turns, so the count
     // is captured here and must not move across the restart below.
@@ -825,7 +828,7 @@ fn the_observer_discovers_ranges_completes_records_and_recovers() {
     assert_eq!(record.base, base);
     assert_eq!(record.head, head1);
     assert_eq!(record.layers.len(), 3);
-    assert_eq!(record.conclusion.as_deref(), Some("review dispatched"));
+    assert_eq!(record.conclusion.as_deref(), Some("all layers reviewed"));
     for layer in &record.layers {
         assert_eq!(
             layer.answer.as_deref(),

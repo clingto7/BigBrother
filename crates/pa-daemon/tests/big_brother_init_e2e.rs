@@ -138,7 +138,7 @@ fn serve_review(mut stream: TcpStream) -> std::io::Result<()> {
             }
             None => vec![
                 chunk(
-                    &json!({"role": "assistant", "content": "review dispatched"}),
+                    &json!({"role": "assistant", "content": "REVIEW_SYNTHESIS\nall layers reviewed"}),
                     None,
                 ),
                 chunk(&json!({}), Some("stop")),
@@ -381,7 +381,12 @@ fn init_enrolls_reviews_queries_and_survives_a_restart() {
     assert_eq!(records[0].base, base);
     assert_eq!(records[0].head, head);
     assert_eq!(records[0].layers.len(), 3);
-    assert!(records[0].conclusion.is_some());
+    // The synthesis is the unwrapped body after the REVIEW_SYNTHESIS
+    // marker (ADR 0030) — the turn narration never enters the record.
+    assert_eq!(
+        records[0].conclusion.as_deref(),
+        Some("all layers reviewed")
+    );
 
     // The operator query surface reads the same durable facts.
     let status = load_repository_status(&QueryOptions {

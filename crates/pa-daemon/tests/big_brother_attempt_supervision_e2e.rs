@@ -191,7 +191,7 @@ fn serve_review(mut stream: TcpStream, project_fit_calls: &AtomicUsize) -> std::
             }
             None => vec![
                 chunk(
-                    &json!({"role": "assistant", "content": "review dispatched"}),
+                    &json!({"role": "assistant", "content": "REVIEW_SYNTHESIS\nall layers reviewed"}),
                     None,
                 ),
                 chunk(&json!({}), Some("stop")),
@@ -526,10 +526,14 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].base, base);
     assert_eq!(records[0].head, head);
-    // The record carries the attempt count the review consumed.
+    // The record carries the attempt count the review consumed, and the
+    // synthesis unwrapped after the marker line (ADR 0030).
     assert_eq!(records[0].attempts, 2);
     assert_eq!(records[0].layers.len(), 3);
-    assert!(records[0].conclusion.is_some());
+    assert_eq!(
+        records[0].conclusion.as_deref(),
+        Some("all layers reviewed")
+    );
     // The query surface shows the settled range without a failure row.
     let status = load_repository_status(&QueryOptions {
         agent_dir: fixture.agent_dir,
