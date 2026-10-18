@@ -50,10 +50,29 @@ review-finding publisher uses the watched Repository's GitHub Issues only.
 
 ### Tracked branch
 
-A branch that the user explicitly selects for observation. A repository may
-track multiple branches, and the tracked-branch set may be expanded after the
-repository is already being monitored. The exact set is configuration, not an
-implicit choice made by the reviewer.
+A branch whose remote updates are observed for review. The first monitored
+branch defaults to the repository's remote default (`origin/HEAD`, then
+`main`, then `master`); additional branches are explicit configuration added
+later.
+
+### Review worktree
+
+A dedicated, operator-prepared checkout that Big Brother may fast-forward after
+fetching the tracked branch. It is separate from the user's daily checkout and
+is the only worktree the observer may update.
+
+### Observer
+
+The foreground Big Brother control process that fetches and advances the
+review worktree, scans for new review ranges, supervises review attempts, and
+delivers completed records. It coordinates sessions through the Prime-agent
+daemon but does not execute model turns itself.
+
+### Review session
+
+The long-lived repository-scoped agent conversation maintained for background
+reviews. It is served by the Prime-agent daemon and is separate from a user's
+interactive operator session.
 
 ### Commit review
 
@@ -184,8 +203,9 @@ final result.
 
 ### Watch service
 
-The continuously running Big Brother service that drives branch observation
-and recovery. It does not replace the repository-aware agent's judgment.
+The platform-supervised deployment of the Observer. It drives branch
+observation and recovery but does not replace the repository-aware agent's
+judgment.
 
 ### Review record
 

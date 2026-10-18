@@ -65,6 +65,10 @@ pub struct BranchState {
     /// so a later range re-covers its commits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<ReviewFailure>,
+    /// The last fetch/worktree update refusal. It is cleared after a
+    /// successful update and never changes the review cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observation_failure: Option<ObservationFailure>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -107,6 +111,15 @@ pub struct ReviewFailure {
     /// The explicit failure reason (ADR 0017's `timed_out`).
     pub reason: String,
     pub failed_at: String,
+}
+
+/// A durable refusal to update the dedicated review worktree.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationFailure {
+    pub kind: String,
+    pub message: String,
+    pub observed_at: String,
 }
 
 /// The outcome of admitting an observed head for one branch.
@@ -468,6 +481,53 @@ impl RepositoryStateStore {
             }
         }
         branch_state.cursor = Some(revision.to_string());
+        branch_state.updated_at = crate::util::now_iso();
+        self.write_state(&state)?;
+        drop(lock);
+        Ok(())
+    }
+
+    /// Record why a branch could not be fetched or advanced. This is
+    /// operational state only; it never advances or resets the review cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state I/O or locking error.
+    pub fn record_observation_failure(
+        &self,
+        branch: &str,
+        kind: &str,
+        message: &str,
+    ) -> Result<(), StateError> {
+        let lock = self.acquire_lock()?;
+        let mut state = self.read_state()?;
+        let branch_state = state.branches.entry(branch.to_owned()).or_default();
+        branch_state.last_observation_failure = Some(ObservationFailure {
+            kind: kind.to_owned(),
+            message: message.to_owned(),
+            observed_at: crate::util::now_iso(),
+        });
+        branch_state.updated_at = crate::util::now_iso();
+        self.write_state(&state)?;
+        drop(lock);
+        Ok(())
+    }
+
+    /// Clear the last worktree update refusal after a successful sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state I/O or locking error.
+    pub fn clear_observation_failure(&self, branch: &str) -> Result<(), StateError> {
+        let lock = self.acquire_lock()?;
+        let mut state = self.read_state()?;
+        let Some(branch_state) = state.branches.get_mut(branch) else {
+            return Ok(());
+        };
+        if branch_state.last_observation_failure.is_none() {
+            return Ok(());
+        }
+        branch_state.last_observation_failure = None;
         branch_state.updated_at = crate::util::now_iso();
         self.write_state(&state)?;
         drop(lock);

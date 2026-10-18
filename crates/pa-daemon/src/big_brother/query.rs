@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-use crate::big_brother::state::{RepositoryStateStore, ReviewFailure, ReviewRange, ReviewRecord};
+use crate::big_brother::state::{
+    ObservationFailure, RepositoryStateStore, ReviewFailure, ReviewRange, ReviewRecord,
+};
 
 /// The query command's runtime options.
 #[derive(Debug, Clone)]
@@ -32,6 +34,8 @@ pub struct BranchStatus {
     pub in_flight: Option<ReviewRange>,
     /// The most recent range that exhausted its attempts (ADR 0028).
     pub last_failure: Option<ReviewFailure>,
+    /// The last refusal to fetch or advance the review worktree.
+    pub last_observation_failure: Option<ObservationFailure>,
     /// The completed review records, oldest first.
     pub records: Vec<ReviewRecord>,
 }
@@ -76,6 +80,7 @@ pub fn load_repository_status(options: &QueryOptions) -> Result<RepositoryStatus
             cursor: branch_state.cursor,
             in_flight: branch_state.in_flight,
             last_failure: branch_state.last_failure,
+            last_observation_failure: branch_state.last_observation_failure,
             records,
         });
     }
@@ -112,6 +117,14 @@ pub fn render_status(status: &RepositoryStatus) -> String {
                 failure.attempts,
                 failure.reason,
                 failure.failed_at
+            )
+            .expect("write to String");
+        }
+        if let Some(failure) = &branch.last_observation_failure {
+            writeln!(
+                rendered,
+                "  worktree update skipped: {} ({}) at {}",
+                failure.kind, failure.message, failure.observed_at
             )
             .expect("write to String");
         }
@@ -302,6 +315,7 @@ mod tests {
                     name,
                     cursor: branch_state.cursor,
                     in_flight: branch_state.in_flight,
+                    last_observation_failure: branch_state.last_observation_failure,
                 })
                 .collect(),
         };

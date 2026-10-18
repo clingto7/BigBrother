@@ -98,6 +98,36 @@ prime-agent update [--force]         # Update Prime Agent
 prime-agent shutdown [--force]       # Stop every agent, worker, and background service
 ```
 
+### Big Brother background review
+
+Big Brother watches a dedicated, clean worktree. It fetches the repository's
+default branch (`origin/HEAD`, then `main`, then `master`), fast-forwards that
+worktree, and asks a separate review session to inspect each new range. Keep
+this checkout separate from the repository you use for daily editing.
+
+From a source checkout, install the platform service with:
+
+```bash
+scripts/big-brother-service.sh install --binary "$(command -v pa-daemon)"
+```
+
+The script creates a macOS LaunchAgent or Linux systemd user unit. It only
+writes paths and runtime settings to the service definition; provide Git and
+delivery credentials through the host's existing environment or credential
+helper. Remove the service with `scripts/big-brother-service.sh uninstall`.
+
+If you want your own agent to configure this, give it the following prompt:
+
+> Configure Big Brother for this repository. Use a dedicated clean worktree,
+> separate from my daily checkout. Verify that `pa-daemon` and the Prime-agent
+> daemon are installed, initialize the worktree with `big-brother init` using
+> the existing daemon socket and the repository's review model settings, then
+> run `scripts/big-brother-service.sh install --binary "$(command -v pa-daemon)"`.
+> Do not put tokens or secret values in a plist, systemd unit, repository file,
+> or git commit. Show me the service path, agent directory, tracked branch,
+> and a status check; stop if the worktree is dirty or is the same checkout I
+> use for daily editing.
+
 ## Built for Long-Running Work
 Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
 

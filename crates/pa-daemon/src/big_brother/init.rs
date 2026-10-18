@@ -34,7 +34,8 @@ pub struct InitOptions {
     /// The directory to resolve the watched repository from (normally the
     /// operator's current directory inside the persistent work tree).
     pub repo: PathBuf,
-    /// The tracked branch; defaults to the work tree's current branch.
+    /// The tracked branch; defaults to `origin/HEAD`, then `main`, then
+    /// `master`, with the current branch as a local-only fallback.
     pub branch: Option<String>,
     /// The conductor's stable wake name; defaults to
     /// `review-<repository-directory-name>`.
@@ -89,12 +90,14 @@ pub async fn run_init(options: InitOptions) -> Result<InitOutcome> {
     })?;
     let branch = match &options.branch {
         Some(branch) => branch.clone(),
-        None => git::current_branch(&git_root)?.ok_or_else(|| {
-            anyhow!(
-                "the work tree at {} has a detached HEAD; pass --branch to name the tracked branch",
-                git_root.display()
-            )
-        })?,
+        None => git::default_branch(&git_root)?.or(git::current_branch(&git_root)?).ok_or_else(
+            || {
+                anyhow!(
+                    "the work tree at {} has no default, main, or master branch; pass --branch to name the tracked branch",
+                    git_root.display()
+                )
+            },
+        )?,
     };
     let head = git::branch_head(&git_root, &branch)
         .with_context(|| format!("reading the tracked branch {branch}"))?;

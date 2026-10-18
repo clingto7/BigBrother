@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::big_brother::client::{session_id, DaemonClient};
 use crate::big_brother::delivery::{deliver_pending, DeliveryChannels};
-use crate::big_brother::git::branch_head;
+use crate::big_brother::git::{branch_head, fetch_and_fast_forward};
 use crate::big_brother::harvest::{harvest_review, last_assistant_text};
 use crate::big_brother::profile::ReviewProfile;
 use crate::big_brother::state::{
@@ -145,10 +145,17 @@ async fn observe_repo(
         }
     }
 
-    // Observe: the persistent work tree's local branch head. GitHub-side
-    // fetching is a later delivery-source concern.
+    // Fetch before observing: the work tree is dedicated to Big Brother, so
+    // advancing its tracked branch is safe and makes the local head the exact
+    // content the review session will inspect (ADR 0031).
     let state = store.load()?;
     for branch in state.branches.keys() {
+        if let Err(error) = fetch_and_fast_forward(&git_root, branch) {
+            store.record_observation_failure(branch, error.kind(), &error.to_string())?;
+            eprintln!("big-brother observer: branch {branch} update skipped: {error}");
+            continue;
+        }
+        store.clear_observation_failure(branch)?;
         let head = branch_head(&git_root, branch)?;
         match store.admit(branch, &head)? {
             Admission::Admitted(range) => {

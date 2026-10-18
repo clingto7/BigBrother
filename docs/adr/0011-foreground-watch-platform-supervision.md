@@ -7,14 +7,14 @@ Date: 2026-09-14
 ## Context
 
 Big Brother must monitor repositories for long periods on a developer's Mac
-and later on Linux servers or VPS hosts. The existing `big-brother watch`
-command already owns the polling, retry, durable-state, and graceful-stop
-behavior. Making the application daemonize itself would duplicate lifecycle
+and later on Linux desktops or servers. The foreground `pa-daemon observer`
+owns the polling, retry, durable-state, and graceful-stop behavior. Making
+the application daemonize itself would duplicate lifecycle
 responsibilities and make shutdown and logging differ by platform.
 
 ## Decision
 
-`big-brother watch` remains a foreground service. Platform deployment adapters
+`pa-daemon observer` remains a foreground service. Platform deployment adapters
 supervise it:
 
 - macOS uses `launchd` through a LaunchAgent or LaunchDaemon definition;
