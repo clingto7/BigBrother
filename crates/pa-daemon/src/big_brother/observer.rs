@@ -1,0 +1,487 @@
+//! The Big Brother watch service: a daemon-protocol client that
+//! periodically observes enrolled repositories' tracked branches, admits
+//! new Review ranges (ADR 0018/0025), wakes the repository's review
+//! conductor by name, and completes the durable record from the settled
+//! conversation (ADR 0026) — collecting each layer's full answer from the
+//! settled child. Recovery is state-driven: an in-flight range found at
+//! startup either harvests from an already-settled conversation or gets
+//! its wake retried (a retry is a new attempt with the same input
+//! identity).
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context as _, Result};
+use serde_json::{json, Value};
+
+use crate::big_brother::client::{session_id, DaemonClient};
+use crate::big_brother::delivery::{deliver_pending, DeliveryChannels};
+use crate::big_brother::git::{branch_head, fetch_and_fast_forward};
+use crate::big_brother::harvest::{harvest_review, last_assistant_text};
+use crate::big_brother::profile::ReviewProfile;
+use crate::big_brother::state::{
+    Admission, RepositoryState, RepositoryStateStore, ReviewRange, ReviewRecord, ReviewRecordLayer,
+    STATE_VERSION,
+};
+
+/// The watch service's runtime options.
+#[derive(Debug, Clone)]
+pub struct ObserverOptions {
+    /// The daemon's supervisor socket.
+    pub socket_path: PathBuf,
+    /// The agent dir holding `big-brother/repos/`.
+    pub agent_dir: PathBuf,
+    /// The scan interval.
+    pub interval: Duration,
+    /// Run exactly one scan and exit (deployment probes and tests).
+    pub once: bool,
+}
+
+/// Run the watch service: scan, sleep, repeat. Scan failures are logged
+/// and retried on the next interval — observation outlives any one
+/// daemon restart.
+///
+/// # Errors
+///
+/// Returns only an unrecoverable startup failure; scan-level errors are
+/// logged.
+pub async fn run_observer(options: ObserverOptions) -> Result<()> {
+    // Wakes this observer process has issued (session, head): a
+    // non-resident in-flight session is re-woken at most once per run.
+    let mut woken: BTreeSet<(String, String)> = BTreeSet::new();
+    loop {
+        if let Err(error) = scan_once(&options, &mut woken).await {
+            eprintln!("big-brother observer: scan failed: {error:#}");
+        }
+        if options.once {
+            return Ok(());
+        }
+        tokio::time::sleep(options.interval).await;
+    }
+}
+
+/// One observation pass over every enrolled repository.
+async fn scan_once(
+    options: &ObserverOptions,
+    woken: &mut BTreeSet<(String, String)>,
+) -> Result<()> {
+    let repos_root = options.agent_dir.join("big-brother").join("repos");
+    let entries = std::fs::read_dir(&repos_root)
+        .with_context(|| format!("reading enrolled repositories at {}", repos_root.display()))?;
+    // Delivery channels resolve once per scan (ADR 0029): an absent key
+    // disables its channel for the whole pass.
+    let channels = DeliveryChannels::from_env();
+    let mut client: Option<DaemonClient> = None;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let repo_dir = entry.path();
+        if !repo_dir.join("state.json").is_file() {
+            continue;
+        }
+        let result = observe_repo(
+            &mut client,
+            &options.socket_path,
+            &repo_dir,
+            woken,
+            &channels,
+        )
+        .await;
+        if let Err(error) = result {
+            eprintln!(
+                "big-brother observer: repository {} failed: {error:#}",
+                repo_dir.display()
+            );
+        }
+    }
+    drop(client);
+    Ok(())
+}
+
+/// Observe one enrolled repository: complete any in-flight range, then
+/// admit and wake for a newly observed head.
+async fn observe_repo(
+    client: &mut Option<DaemonClient>,
+    socket_path: &Path,
+    repo_dir: &Path,
+    woken: &mut BTreeSet<(String, String)>,
+    channels: &DeliveryChannels,
+) -> Result<()> {
+    let state: RepositoryState = read_state(repo_dir)?;
+    let Some(git_root) = state.git_root.clone() else {
+        return Err(anyhow!(
+            "the state records no git root (written by a pre-observer build); re-enroll to record it"
+        ));
+    };
+    let git_root = PathBuf::from(git_root);
+    let Some(profile) = resolve_profile_from_repo_dir(repo_dir)? else {
+        return Err(anyhow!("no review profile beside the repository state"));
+    };
+    let store = RepositoryStateStore::open(&store_agent_dir(repo_dir), &git_root);
+    // The slug must round-trip: a moved work tree would otherwise write
+    // state into a different repository's directory.
+    anyhow::ensure!(
+        store.state_path().parent() == Some(repo_dir),
+        "the state's git root {} does not key this enrolled directory; re-enroll the repository",
+        store.git_root().display()
+    );
+    let client = ensure_client(client, socket_path).await?;
+
+    // An in-flight range completes before a newer head admits (ADR 0018),
+    // under its attempt budget (ADR 0028): a stalled conversation is
+    // cancelled and re-attempted, never waited on forever.
+    for (branch, branch_state) in &state.branches {
+        let Some(in_flight) = branch_state.in_flight.clone() else {
+            continue;
+        };
+        if attempt_expired(&profile, &in_flight) {
+            supervise_timeout(client, &store, &profile, branch, &in_flight, woken).await?;
+            return Ok(());
+        }
+        let completed =
+            try_complete_review(client, &store, &profile, branch, &in_flight, woken).await?;
+        if !completed {
+            return Ok(());
+        }
+    }
+
+    // Fetch before observing: the work tree is dedicated to Big Brother, so
+    // advancing its tracked branch is safe and makes the local head the exact
+    // content the review session will inspect (ADR 0031).
+    let state = store.load()?;
+    for branch in state.branches.keys() {
+        if let Err(error) = fetch_and_fast_forward(&git_root, branch) {
+            store.record_observation_failure(branch, error.kind(), &error.to_string())?;
+            eprintln!("big-brother observer: branch {branch} update skipped: {error}");
+            continue;
+        }
+        store.clear_observation_failure(branch)?;
+        let head = branch_head(&git_root, branch)?;
+        match store.admit(branch, &head)? {
+            Admission::Admitted(range) => {
+                eprintln!(
+                    "big-brother observer: admitted {}..{head} on {branch}",
+                    range.base
+                );
+                let message = wake_message(&range, profile.max_attempts());
+                wake_conductor(client, &profile.session_name, message).await?;
+                woken.insert((profile.session_name.clone(), head));
+            }
+            Admission::AlreadyReviewed { .. }
+            | Admission::InReview { .. }
+            | Admission::Busy { .. } => {}
+        }
+    }
+
+    // Delivery (ADR 0029): the record is the common source; every
+    // enabled channel retries from the scan until delivered. The pass
+    // runs after observation, so a record completed this scan delivers
+    // in the same one.
+    deliver_pending(&store, channels, &git_root).await?;
+    Ok(())
+}
+
+/// Try to complete the in-flight range: collect the layers' answers from
+/// the settled children, harvest the conductor's transcript, and persist
+/// the record. `Ok(false)` means the review has not settled yet — the
+/// next scan retries.
+async fn try_complete_review(
+    client: &mut DaemonClient,
+    store: &RepositoryStateStore,
+    profile: &ReviewProfile,
+    branch: &str,
+    in_flight: &ReviewRange,
+    woken: &mut BTreeSet<(String, String)>,
+) -> Result<bool> {
+    let sessions = client.list_sessions().await?;
+    let Some(conductor) = sessions
+        .iter()
+        .find(|row| row.get("sessionName").and_then(Value::as_str) == Some(&profile.session_name))
+    else {
+        // The conductor is not resident (a daemon restart before or
+        // during the review, or a cancelled attempt's kill). A wake this
+        // process has not yet issued for the CURRENT attempt is the
+        // retry; one it has means the turn is still spinning up. A
+        // refused wake gives the quota back, so the next scan retries it.
+        if woken.insert((profile.session_name.clone(), in_flight.head.clone())) {
+            eprintln!(
+                "big-brother observer: re-waking {} for a recovered in-flight range (attempt {})",
+                profile.session_name, in_flight.attempts
+            );
+            let message = wake_message(in_flight, profile.max_attempts());
+            if let Err(error) = wake_conductor(client, &profile.session_name, message).await {
+                woken.remove(&(profile.session_name.clone(), in_flight.head.clone()));
+                return Err(error);
+            }
+        }
+        return Ok(false);
+    };
+    let conductor_id = session_id(conductor)?;
+    // Every configured layer's child must exist and have answered.
+    let mut answers: BTreeMap<String, String> = BTreeMap::new();
+    let mut child_ids: BTreeMap<String, String> = BTreeMap::new();
+    for layer in &profile.layers {
+        // The dispatch names each layer's child `<layer>-<head>`: the
+        // exact in-flight head discriminates this range's reviewer from
+        // the previous range's retained child.
+        let child_name = format!("{}-{}", layer.name, in_flight.head);
+        let Some(child) = sessions.iter().find(|row| {
+            row.get("sessionName").and_then(Value::as_str) == Some(child_name.as_str())
+        }) else {
+            return Ok(false);
+        };
+        let child_id = session_id(child)?;
+        let messages = client.get_messages(&child_id).await?;
+        let Some(answer) = last_assistant_text(&messages) else {
+            return Ok(false);
+        };
+        answers.insert(layer.name.clone(), answer);
+        child_ids.insert(layer.name.clone(), child_id);
+    }
+    let transcript = client.get_messages(&conductor_id).await?;
+    // A harvest miss means the conversation has not settled yet.
+    let Ok(harvested) = harvest_review(&transcript, &answers) else {
+        return Ok(false);
+    };
+    if harvested.base != in_flight.base || harvested.head != in_flight.head {
+        return Err(anyhow!(
+            "the conductor's transcript reviews {}..{} but the admitted range is {}..{}",
+            harvested.base,
+            harvested.head,
+            in_flight.base,
+            in_flight.head
+        ));
+    }
+    let record = ReviewRecord {
+        version: 1,
+        branch: branch.to_string(),
+        base: harvested.base,
+        head: harvested.head,
+        attempts: in_flight.attempts,
+        completed_at: String::new(),
+        layers: harvested
+            .layers
+            .into_iter()
+            .map(|layer| ReviewRecordLayer {
+                model: profile
+                    .layer_model(&layer.layer)
+                    .unwrap_or_default()
+                    .to_string(),
+                child: child_ids.get(&layer.layer).cloned(),
+                answer: Some(layer.answer),
+                layer: layer.layer,
+            })
+            .collect(),
+        conclusion: Some(harvested.conclusion),
+        delivery: BTreeMap::new(),
+    };
+    store.complete(record)?;
+    woken.remove(&(profile.session_name.clone(), in_flight.head.clone()));
+    eprintln!(
+        "big-brother observer: completed review of {}..{} on {branch}",
+        in_flight.base, in_flight.head
+    );
+    Ok(true)
+}
+
+/// Whether the range's current attempt has exhausted its budget (ADR
+/// 0028). A legacy document without an attempt stamp times out from its
+/// admission; an unparseable stamp never times out (corrupt state is
+/// loud elsewhere, a silent mis-timed cancellation is worse).
+fn attempt_expired(profile: &ReviewProfile, range: &ReviewRange) -> bool {
+    let started = if range.attempt_started_at.is_empty() {
+        range.admitted_at.as_str()
+    } else {
+        range.attempt_started_at.as_str()
+    };
+    let Some(started_ms) = crate::util::iso_to_unix_ms(started) else {
+        eprintln!(
+            "big-brother observer: attempt stamp \"{started}\" does not parse; not timing out"
+        );
+        return false;
+    };
+    crate::util::now_ms().saturating_sub(started_ms) >= profile.attempt_timeout().as_millis() as u64
+}
+
+/// A timed-out attempt (ADR 0028): cancel it — the conductor first, then
+/// every layer child (a dead conductor reacts to no child notices) —
+/// then either re-arm the range as a fresh attempt, or fail the range
+/// loudly at the attempt ceiling. The re-arm does NOT wake inline: a
+/// wake issued in the kill's shadow races the cancelled worker's session
+/// lease (the cold-wake spawn would be refused with nothing retrying
+/// it), so the re-arm only advances the state and hands the attempt's
+/// wake quota back — the next scan's recovery path wakes the conductor
+/// with the retry instruction, outside the race window.
+async fn supervise_timeout(
+    client: &mut DaemonClient,
+    store: &RepositoryStateStore,
+    profile: &ReviewProfile,
+    branch: &str,
+    in_flight: &ReviewRange,
+    woken: &mut BTreeSet<(String, String)>,
+) -> Result<()> {
+    eprintln!(
+        "big-brother observer: attempt {} of {}..{} on {branch} timed out",
+        in_flight.attempts, in_flight.base, in_flight.head
+    );
+    cancel_attempt(client, profile, in_flight).await;
+    if in_flight.attempts >= profile.max_attempts() {
+        store
+            .fail_range(branch, &in_flight.head, "timed_out")
+            .map_err(|error| anyhow!("failing the exhausted review range: {error}"))?;
+        eprintln!(
+            "big-brother observer: range {}..{} on {branch} failed after {} attempt(s); the cursor holds and a later range re-covers it",
+            in_flight.base, in_flight.head, in_flight.attempts
+        );
+        return Ok(());
+    }
+    store
+        .retry_attempt(branch, &in_flight.head)
+        .map_err(|error| anyhow!("re-arming the review attempt: {error}"))?;
+    woken.remove(&(profile.session_name.clone(), in_flight.head.clone()));
+    eprintln!(
+        "big-brother observer: re-armed {}..{} on {branch} as attempt {}",
+        in_flight.base,
+        in_flight.head,
+        in_flight.attempts + 1
+    );
+    Ok(())
+}
+
+/// Cancel one attempt (ADR 0028): kill the conductor first, then every
+/// configured layer's child. Best-effort by design — a kill that fails (a
+/// session already gone) logs and moves on; the attempt is abandoned
+/// either way, and a survivor child never answers for the retried range
+/// (the observer matches settled children by the exact in-flight head).
+async fn cancel_attempt(
+    client: &mut DaemonClient,
+    profile: &ReviewProfile,
+    in_flight: &ReviewRange,
+) {
+    let sessions = match client.list_sessions().await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            eprintln!("big-brother observer: listing sessions to cancel an attempt: {error:#}");
+            return;
+        }
+    };
+    let mut targets = vec![profile.session_name.clone()];
+    targets.extend(
+        profile
+            .layers
+            .iter()
+            .map(|layer| format!("{}-{}", layer.name, in_flight.head)),
+    );
+    for name in targets {
+        let Some(id) = sessions
+            .iter()
+            .find(|row| row.get("sessionName").and_then(Value::as_str) == Some(name.as_str()))
+            .and_then(|row| row.get("id").or_else(|| row.get("activeSessionId")))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        match client
+            .request(json!({ "type": "kill", "activeSessionId": id }))
+            .await
+        {
+            Ok(_) => eprintln!("big-brother observer: cancelled {name}"),
+            Err(error) => eprintln!("big-brother observer: cancelling {name}: {error:#}"),
+        }
+    }
+}
+
+/// The conductor's wake message for one attempt (ADR 0026's range shape;
+/// a retried attempt appends ADR 0028's explicit retry instruction — the
+/// cancelled attempt's answers died with its in-memory children, so the
+/// fresh attempt dispatches every layer anew). Both variants carry
+/// ADR 0030's synthesis marker contract — the wake message is the most
+/// salient place a model actually obeys it (the system prompt's copy
+/// alone proved ignorable on the real model).
+fn wake_message(range: &ReviewRange, max_attempts: u32) -> String {
+    let marker_contract = "\nAfter every layer has replied, write the range's synthesis as your \
+         final message: the FIRST line must be exactly REVIEW_SYNTHESIS, the synthesis follows \
+         from the next line on. No preamble before that marker line.";
+    if range.attempts > 1 {
+        format!(
+            "REVIEW_RANGE {}..{} END\n\
+             Retry attempt {} of {max_attempts}: the prior attempt timed out and its reviewers \
+             were cancelled. Dispatch every configured review layer fresh for this range, then \
+             synthesize once all layers have replied.{marker_contract}",
+            range.base, range.head, range.attempts
+        )
+    } else {
+        format!(
+            "REVIEW_RANGE {}..{} END{marker_contract}",
+            range.base, range.head
+        )
+    }
+}
+
+/// Wake (or message) the review conductor with one product-defined
+/// message (ADR 0026: the range wake, or its retry variant, ADR 0028).
+async fn wake_conductor(
+    client: &mut DaemonClient,
+    session_name: &str,
+    message: String,
+) -> Result<()> {
+    client
+        .request(json!({
+            "type": "send_message",
+            "targetActiveSessionId": session_name,
+            "message": message,
+        }))
+        .await
+        .context("waking the review conductor")?;
+    Ok(())
+}
+
+/// The repository state off disk (same document the store writes).
+fn read_state(repo_dir: &Path) -> Result<RepositoryState> {
+    let bytes = std::fs::read(repo_dir.join("state.json"))
+        .with_context(|| format!("reading {}", repo_dir.join("state.json").display()))?;
+    let state: RepositoryState = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", repo_dir.join("state.json").display()))?;
+    if state.version != STATE_VERSION {
+        anyhow::bail!(
+            "unsupported repository state version {} (expected {STATE_VERSION})",
+            state.version
+        );
+    }
+    Ok(state)
+}
+
+/// The profile beside the state (the repository-keyed directory layout).
+fn resolve_profile_from_repo_dir(repo_dir: &Path) -> Result<Option<ReviewProfile>> {
+    // The profile loader keys by the git root, which the observer learns
+    // from the state — read the file beside it directly instead.
+    let path = repo_dir.join("profile.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let profile: ReviewProfile =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(profile))
+}
+
+/// The agent dir owning a repo-keyed directory: `<agent>/big-brother/
+/// repos/<slug>` -> `<agent>` (four path components up from the file).
+fn store_agent_dir(repo_dir: &Path) -> PathBuf {
+    repo_dir
+        .ancestors()
+        .nth(3)
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+}
+
+/// Connect the shared scan client if needed.
+async fn ensure_client<'a>(
+    client: &'a mut Option<DaemonClient>,
+    socket_path: &Path,
+) -> Result<&'a mut DaemonClient> {
+    if client.is_none() {
+        *client = Some(DaemonClient::connect(socket_path).await?);
+    }
+    Ok(client.as_mut().expect("just connected"))
+}

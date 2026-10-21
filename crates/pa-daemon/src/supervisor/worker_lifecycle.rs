@@ -272,6 +272,10 @@ impl Supervisor {
             "promptTemplates",
             "autonomous",
             "executionMode",
+            // The review-profile marker (ADR 0024): the restricted review
+            // session's identity rides the durable create so a respawned
+            // worker rebuilds the same tool boundary.
+            "bigBrotherReview",
         ] {
             if let Some(value) = config_object.and_then(|config| config.get(key)) {
                 durable_rest.insert(key.to_string(), value.clone());

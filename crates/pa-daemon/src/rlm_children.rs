@@ -752,6 +752,20 @@ impl SupervisorChildSessions {
         self.inner.delete_inactive_subagent(child_id).await
     }
 
+    /// Retire one dead child's name reservation (ADR 0028's retry path):
+    /// a cancelled attempt's reviewer is gone, but its ledger edge holds
+    /// the `<layer>-<head>` name against the retry's fresh dispatch.
+    /// `"deleted"` once the edge is tombstoned and the record dropped,
+    /// `"running"` for a child that still runs, `"not_found"` when
+    /// nothing holds the name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger tombstone cannot be appended.
+    pub async fn retire_dead_child_name(&self, name: &str) -> Result<&'static str> {
+        self.inner.retire_dead_child_name(name).await
+    }
+
     fn entry(record: &ChildRecord) -> RlmSubagentEntry {
         let running = record.settled_status.is_none();
         RlmSubagentEntry {

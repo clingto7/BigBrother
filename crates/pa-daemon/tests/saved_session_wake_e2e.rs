@@ -29,9 +29,15 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+use pa_daemon::big_brother::state::{
+    Admission, Completion, RepositoryStateStore, ReviewRecord, ReviewRecordLayer,
+};
 
 struct Daemon {
     child: Child,
@@ -110,6 +116,130 @@ fn serve(mut stream: TcpStream, answer: &str) -> std::io::Result<()> {
     )
 }
 
+fn spawn_review_mock(main_calls: Arc<AtomicUsize>) -> PathBuf {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind review mock");
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let calls = Arc::clone(&main_calls);
+            std::thread::spawn(move || {
+                let _ = serve_review(stream, &calls);
+            });
+        }
+    });
+    PathBuf::from(url)
+}
+
+fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = value.trim().parse().unwrap_or_default();
+        }
+    }
+    let mut body = vec![0; content_length];
+    reader.read_exact(&mut body)?;
+    let request: Value = serde_json::from_slice(&body).map_err(std::io::Error::other)?;
+    let model = request["model"].as_str().unwrap_or_default();
+    let data = if model == "main" {
+        let index = main_calls.fetch_add(1, Ordering::SeqCst);
+        // Content-driven script (ranges repeat across wakes): bootstrap
+        // is the first call; a wake whose head has no dispatched reviewer
+        // yet dispatches; every later turn of the same range answers text.
+        let dispatch_turn = index != 0
+            && (|| {
+                let request_text = request.to_string();
+                // The LAST marker is the user message: the conductor
+                // system prompt also names the REVIEW_RANGE shape.
+                let (base, head) = request_text
+                    .rsplit_once("REVIEW_RANGE ")
+                    .and_then(|(_, suffix)| suffix.split_once(" END"))
+                    .and_then(|(range, _)| range.split_once(".."))?;
+                if base.starts_with('<') {
+                    return None;
+                }
+                // Already dispatched for this head: the tool results say
+                // "reviewer spawned as child ... for <base>..<head>".
+                if request_text.contains(&format!("for {base}..{head}")) {
+                    return None;
+                }
+                Some(())
+            })()
+            .is_some();
+        if dispatch_turn {
+            let request_text = request.to_string();
+            let (base, head) = request_text
+                .rsplit_once("REVIEW_RANGE ")
+                .and_then(|(_, suffix)| suffix.split_once(" END"))
+                .and_then(|(range, _)| range.split_once(".."))
+                .expect("wake request contains fixed range");
+            let layers = ["requirements", "project-fit", "implementation"];
+            let calls: Vec<Value> = layers
+                .iter()
+                .enumerate()
+                .map(|(index, layer)| {
+                    json!({
+                        "index": index,
+                        "id": format!("call-review-{index}-{head}"),
+                        "type": "function",
+                        "function": {
+                            "name": "dispatch_review",
+                            "arguments": json!({
+                                "layer": layer,
+                                "baseSha": base,
+                                "headSha": head
+                            }).to_string()
+                        }
+                    })
+                })
+                .collect();
+            vec![
+                chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
+                chunk(&json!({}), Some("tool_calls")),
+            ]
+        } else if index == 0 {
+            vec![
+                chunk(&json!({"role": "assistant", "content": "ready"}), None),
+                chunk(&json!({}), Some("stop")),
+            ]
+        } else {
+            vec![
+                chunk(
+                    &json!({"role": "assistant", "content": "REVIEW_SYNTHESIS\nall layers reviewed"}),
+                    None,
+                ),
+                chunk(&json!({}), Some("stop")),
+            ]
+        }
+    } else {
+        vec![
+            chunk(
+                &json!({"role": "assistant", "content": format!("{model} reviewed")}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ]
+    };
+    let mut payload = String::new();
+    for part in data {
+        write!(payload, "data: {part}\n\n").expect("SSE chunk");
+    }
+    payload.push_str("data: [DONE]\n\n");
+    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}").as_bytes())
+}
+
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
@@ -118,8 +248,10 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .arg(socket)
         .arg("--agent-dir")
         .arg(agent_dir)
-        // The woken worker has no create-config model: it falls back to the
-        // process pair (like the TS daemon's default session config).
+        // The daemon's env pair is the spawn fallback a woken worker must
+        // not prefer over its session file's pinned model: mock-1 differs
+        // from every review profile model here on purpose, so a model
+        // restoration regression fails the review flow loudly.
         .env("PRIME_AGENT_MODEL_PROVIDER", "prime-inference")
         .env("PRIME_AGENT_MODEL", "mock-1")
         .stdout(Stdio::null())
@@ -240,8 +372,509 @@ fn messages(client: &mut Client, id: &str, active_session_id: &str) -> String {
     serde_json::to_string(&response["data"]).expect("messages json")
 }
 
+fn git(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Review Test")
+        .env("GIT_AUTHOR_EMAIL", "review@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Review Test")
+        .env("GIT_COMMITTER_EMAIL", "review@example.invalid")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git UTF-8")
+        .trim()
+        .to_string()
+}
+
+/// Write the repository's review profile (ADR 0024) under the agent dir:
+/// the wake name, the main model, and the three layer models. Stored
+/// outside the work tree on purpose — reviewed content must not edit the
+/// reviewer's operating rules.
+fn write_review_profile(agent_dir: &Path, repo: &Path) {
+    let path = pa_daemon::big_brother::profile::profile_path(agent_dir, repo);
+    std::fs::create_dir_all(path.parent().expect("profile dir")).expect("profile dir");
+    std::fs::write(
+        &path,
+        json!({
+            "version": 1,
+            "sessionName": "review-main",
+            "mainModel": "prime-inference/main",
+            "layers": [
+                { "name": "requirements", "model": "prime-inference/requirements" },
+                { "name": "project-fit", "model": "prime-inference/project-fit" },
+                { "name": "implementation", "model": "prime-inference/implementation" }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("review profile");
+}
+
 #[test]
-fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
+fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("code.txt"), "baseline\n").expect("baseline file");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "baseline"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+
+    let agent_dir = dir.path().join("agent");
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let url = spawn_review_mock(Arc::clone(&main_calls));
+    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id": id, "name": id, "api": "openai-completions",
+                "contextWindow": 128_000, "maxTokens": 4096
+            })
+        })
+        .collect();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": { "prime-inference": {
+                "api": "openai-completions", "baseUrl": url.to_string_lossy(),
+                "apiKey": "sk-review-test", "models": models
+            }}
+        })
+        .to_string(),
+    )
+    .expect("models.json");
+    let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let store = RepositoryStateStore::open(&agent_dir, &repo);
+    // Enrollment seeds the baseline cursor through the product boundary
+    // (the dedicated `init` command owns this in a later increment).
+    store
+        .seed_cursor(&branch, &base)
+        .expect("seed baseline cursor");
+    write_review_profile(&agent_dir, &repo);
+    let socket = dir.path().join("daemon.sock");
+    let daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command(
+        "create",
+        &json!({
+            "type": "create", "name": "review-main",
+            "config": { "cwd": repo, "sessionDir": sessions,
+                "bigBrotherReview": true }
+        }),
+    );
+    let created = client.read_response("create");
+    assert_eq!(created["success"], true, "{created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active id")
+        .to_string();
+    client.send_command(
+        "bootstrap",
+        &json!({
+            "type": "prompt_and_wait", "activeSessionId": active_id, "message": "bootstrap"
+        }),
+    );
+    assert_eq!(client.read_response("bootstrap")["success"], true);
+    client.send_command(
+        "kill",
+        &json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    assert_eq!(client.read_response("kill")["success"], true);
+    drop(client);
+    drop(daemon);
+    std::fs::remove_file(&socket).ok();
+
+    std::fs::write(repo.join("code.txt"), "changed\n").expect("new content");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "change"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(base, head);
+
+    let restarted = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command("list", &json!({ "type": "list" }));
+    assert_eq!(
+        client.read_response("list")["data"]["sessions"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    // The durable repository state survived the daemon restart: the cursor
+    // holds the seeded baseline and no range is in flight.
+    let state = store.load().expect("reload repository state");
+    let branch_state = state.branches.get(&branch).expect("branch state");
+    let stored_base = branch_state.cursor.clone().expect("seeded cursor");
+    let observed_head = git(&repo, &["rev-parse", "HEAD"]);
+    assert_eq!(stored_base, base);
+    assert_eq!(observed_head, head);
+    assert!(branch_state.in_flight.is_none());
+    // The observer admits the new range through the product boundary.
+    let range = match store
+        .admit(&branch, &observed_head)
+        .expect("admit the observed range")
+    {
+        Admission::Admitted(range) => range,
+        other => panic!("expected a fresh admission, got {other:?}"),
+    };
+    assert_eq!(range.base, base);
+    assert_eq!(range.head, head);
+    client.send_command(
+        "wake",
+        &json!({
+            "type": "send_message", "targetActiveSessionId": "review-main",
+            "message": format!("REVIEW_RANGE {}..{} END", range.base, range.head)
+        }),
+    );
+    let wake = client.read_response("wake");
+    assert_eq!(wake["success"], true, "{wake}");
+    let woken_id = wake["data"]["target"]["activeSessionId"]
+        .as_str()
+        .expect("woken id");
+    assert_ne!(woken_id, active_id);
+    let parent_messages = wait_until(Duration::from_secs(90), || {
+        let text = messages(&mut client, "parent-messages", woken_id);
+        (text.contains("all layers reviewed") && text.matches("dispatch_review").count() >= 3)
+            .then_some(text)
+    });
+    assert!(
+        !parent_messages.contains("Unknown tool"),
+        "{parent_messages}"
+    );
+
+    // The cold-wake model restoration (ADR 0023): the woken main session
+    // runs on the model its file pins — the profile's main model, seeded
+    // at creation — never the daemon's env fallback (mock-1). The
+    // discriminating mock would have answered plain text on mock-1 and
+    // never dispatched, so the flow above already proves it; the roster
+    // row pins the fact explicitly.
+    client.send_command("woken-roster", &json!({ "type": "list" }));
+    let roster = client.read_response("woken-roster");
+    let woken_model = roster["data"]["sessions"]
+        .as_array()
+        .expect("roster sessions")
+        .iter()
+        .find(|row| row["sessionName"] == "review-main")
+        .expect("woken review-main on the roster")
+        .get("model")
+        .cloned()
+        .expect("woken model");
+    assert_eq!(woken_model["provider"], "prime-inference");
+    assert_eq!(woken_model["id"], "main");
+
+    let layers = ["requirements", "project-fit", "implementation"];
+    let child_summaries = wait_until(Duration::from_secs(90), || {
+        client.send_command("children", &json!({ "type": "list" }));
+        let response = client.read_response("children");
+        let sessions = response["data"]["sessions"].as_array()?;
+        let children: Vec<Value> = sessions
+            .iter()
+            .filter(|row| {
+                layers
+                    .iter()
+                    .any(|layer| row["sessionName"] == format!("{layer}-{head}"))
+            })
+            .cloned()
+            .collect();
+        (children.len() == 3).then_some(children)
+    });
+    let mut child_ids = std::collections::BTreeMap::new();
+    let mut child_answers = std::collections::BTreeMap::new();
+    for layer in layers {
+        let child = child_summaries
+            .iter()
+            .find(|row| row["sessionName"] == format!("{layer}-{head}"))
+            .expect("child");
+        assert_eq!(child["model"]["provider"], "prime-inference");
+        assert_eq!(child["model"]["id"], layer);
+        let child_id = child["id"]
+            .as_str()
+            .or_else(|| child["activeSessionId"].as_str())
+            .expect("child id");
+        let answer = wait_until(Duration::from_secs(90), || {
+            let text = messages(&mut client, "child-messages", child_id);
+            text.contains(&format!("{layer} reviewed")).then_some(text)
+        });
+        assert!(
+            answer.contains(&format!("Review {layer} for {base}..{head}")),
+            "{answer}"
+        );
+        child_ids.insert(layer.to_string(), child_id.to_string());
+        child_answers.insert(layer.to_string(), format!("{layer} reviewed"));
+    }
+
+    // The review conversation (ADR 0026): the transcript carries the
+    // dispatch calls and the conductor's synthesis; the layers' full
+    // answers come from the children themselves (observer-side
+    // collection — a mid-turn wait would deadlock the spawn deferral).
+    // The product collector assembles the record from both.
+    let transcript: Value =
+        serde_json::from_str(&messages(&mut client, "harvest", woken_id)).expect("transcript json");
+    let harvested = pa_daemon::big_brother::harvest::harvest_review(&transcript, &child_answers)
+        .expect("harvest the completed review");
+    assert_eq!(harvested.base, base);
+    assert_eq!(harvested.head, head);
+    assert_eq!(harvested.conclusion, "all layers reviewed");
+    assert_eq!(harvested.layers.len(), 3);
+    for layer in &harvested.layers {
+        assert_eq!(layer.answer, format!("{} reviewed", layer.layer));
+    }
+    let profile = pa_daemon::big_brother::profile::resolve_profile(&agent_dir, &repo)
+        .expect("resolve the repository profile")
+        .expect("profile present");
+
+    // Persist one review record before any delivery (ADR 0021) and advance
+    // the cursor through the same product boundary.
+    let record = ReviewRecord {
+        version: 1,
+        branch: branch.clone(),
+        base: harvested.base,
+        head: harvested.head,
+        attempts: 1,
+        completed_at: String::new(),
+        layers: harvested
+            .layers
+            .into_iter()
+            .map(|layer| ReviewRecordLayer {
+                model: profile
+                    .layer_model(&layer.layer)
+                    .expect("profile layer model")
+                    .to_string(),
+                child: child_ids.get(&layer.layer).cloned(),
+                answer: Some(layer.answer),
+                layer: layer.layer,
+            })
+            .collect(),
+        conclusion: Some(harvested.conclusion),
+        delivery: std::collections::BTreeMap::default(),
+    };
+    match store.complete(record).expect("complete the range") {
+        Completion::Completed {
+            range: done,
+            record_path,
+        } => {
+            assert_eq!(done.head, head);
+            assert!(record_path.exists());
+        }
+        other @ Completion::AlreadyComplete { .. } => {
+            panic!("expected completion, got {other:?}")
+        }
+    }
+    let state = store.load().expect("state after completion");
+    assert_eq!(
+        state.branches[&branch].cursor.as_deref(),
+        Some(head.as_str())
+    );
+    assert!(state.branches[&branch].in_flight.is_none());
+    // The record reads back through the product query surface.
+    let records = store.records(&branch).expect("records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].head, head);
+    assert_eq!(records[0].layers.len(), 3);
+    assert_eq!(
+        records[0].conclusion.as_deref(),
+        Some("all layers reviewed")
+    );
+    // The review ran exactly once; the exact main-model call count varies
+    // with child settle notices triggering follow-up turns, so the count
+    // is captured here and must not move across the restart below.
+    let main_calls_after_review = main_calls.load(Ordering::SeqCst);
+    assert!(main_calls_after_review >= 3);
+    drop(client);
+    drop(restarted);
+    std::fs::remove_file(&socket).ok();
+    let _second_restart = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command("after-result-restart", &json!({ "type": "list" }));
+    assert_eq!(
+        client.read_response("after-result-restart")["success"],
+        true
+    );
+    // The durable repository state prevents a second admission for the
+    // already-reviewed head: no duplicate wake after another restart.
+    assert_eq!(
+        store.admit(&branch, &head).expect("re-admission probe"),
+        Admission::AlreadyReviewed { head: head.clone() }
+    );
+    assert_eq!(main_calls.load(Ordering::SeqCst), main_calls_after_review);
+}
+
+/// The observer process handle: killed at teardown like the daemon, so a
+/// finished test never leaks a scanning process.
+struct Observer {
+    child: Child,
+}
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Spawn the REAL watch service: the product binary polls the daemon, not
+/// the test.
+#[allow(clippy::zombie_processes)]
+fn spawn_observer(socket: &Path, agent_dir: &Path) -> Observer {
+    let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+        .arg("observer")
+        .arg("--socket")
+        .arg(socket)
+        .arg("--agent-dir")
+        .arg(agent_dir)
+        .arg("--interval-secs")
+        .arg("1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the observer");
+    Observer { child }
+}
+
+/// The acceptance loop with the real observer: a commit lands, the
+/// observer admits the range, wakes the conductor, waits for the layers,
+/// harvests, and persists the record; a daemon+observer restart recovers
+/// and reviews the next range without duplicating the first.
+#[test]
+fn the_observer_discovers_ranges_completes_records_and_recovers() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("code.txt"), "baseline\n").expect("baseline file");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "baseline"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+    let agent_dir = dir.path().join("agent");
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let url = spawn_review_mock(Arc::clone(&main_calls));
+    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id": id, "name": id, "api": "openai-completions",
+                "contextWindow": 128_000, "maxTokens": 4096
+            })
+        })
+        .collect();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": { "prime-inference": {
+                "api": "openai-completions", "baseUrl": url.to_string_lossy(),
+                "apiKey": "sk-review-test", "models": models
+            }}
+        })
+        .to_string(),
+    )
+    .expect("models.json");
+    write_review_profile(&agent_dir, &repo);
+    let store = RepositoryStateStore::open(&agent_dir, &repo);
+    store.seed_cursor(&branch, &base).expect("seed baseline");
+
+    let socket = dir.path().join("daemon.sock");
+    let daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _) = Client::connect(&socket);
+    client.send_command(
+        "create",
+        &json!({
+            "type": "create", "name": "review-main",
+            "config": { "cwd": repo, "sessionDir": sessions,
+                "bigBrotherReview": true }
+        }),
+    );
+    let created = client.read_response("create");
+    assert_eq!(created["success"], true, "{created}");
+    let active_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("active id")
+        .to_string();
+    client.send_command(
+        "bootstrap",
+        &json!({
+            "type": "prompt_and_wait", "activeSessionId": active_id, "message": "bootstrap"
+        }),
+    );
+    assert_eq!(client.read_response("bootstrap")["success"], true);
+    drop(client);
+
+    let observer = spawn_observer(&socket, &agent_dir);
+
+    // A new commit lands while the observer watches.
+    std::fs::write(repo.join("code.txt"), "first change\n").expect("first change");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "first change"]);
+    let head1 = git(&repo, &["rev-parse", "HEAD"]);
+    let records = wait_until(Duration::from_secs(90), || {
+        (store.records(&branch).unwrap().len() == 1).then(|| store.records(&branch).unwrap())
+    });
+    let record = &records[0];
+    assert_eq!(record.base, base);
+    assert_eq!(record.head, head1);
+    assert_eq!(record.layers.len(), 3);
+    assert_eq!(record.conclusion.as_deref(), Some("all layers reviewed"));
+    for layer in &record.layers {
+        assert_eq!(
+            layer.answer.as_deref(),
+            Some(format!("{} reviewed", layer.layer).as_str())
+        );
+        assert_eq!(
+            layer.model,
+            format!("prime-inference/{}", layer.layer),
+            "the record names each layer's profile model"
+        );
+        assert!(layer.child.is_some(), "the record names each child");
+    }
+    let state = store.load().unwrap();
+    assert_eq!(
+        state.branches[&branch].cursor.as_deref(),
+        Some(head1.as_str())
+    );
+
+    // Extra scans do not duplicate the review.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(store.records(&branch).unwrap().len(), 1);
+
+    // A daemon + observer restart: the next range reviews normally.
+    drop(observer);
+    drop(daemon);
+    std::fs::remove_file(&socket).ok();
+    let _daemon2 = spawn_daemon(&socket, &agent_dir);
+    let _observer2 = spawn_observer(&socket, &agent_dir);
+    std::fs::write(repo.join("code.txt"), "second change\n").expect("second change");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "second change"]);
+    let head2 = git(&repo, &["rev-parse", "HEAD"]);
+    let records = wait_until(Duration::from_secs(90), || {
+        (store.records(&branch).unwrap().len() == 2).then(|| store.records(&branch).unwrap())
+    });
+    // Records sort by head sha, not completion order: match by head.
+    let second = records
+        .iter()
+        .find(|record| record.head == head2)
+        .expect("the second range's record");
+    assert_eq!(second.base, head1, "the second range continues the cursor");
+    assert_eq!(second.layers.len(), 3);
+}
+
+#[test]
+fn send_to_a_saved_session_after_daemon_restart_wakes_it_and_runs_the_turn() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions = agent_dir.join("sessions");
@@ -271,7 +904,7 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     )
     .expect("write models.json");
     let socket = dir.path().join("daemon.sock");
-    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
 
@@ -343,6 +976,18 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     };
     assert_eq!(saved_rows.len(), 1, "the killed session is saved");
     assert_eq!(saved_rows[0]["name"], "alpha");
+
+    // Simulate a machine restart: the monitor can address the saved session
+    // after a new daemon starts, without retaining the old active worker id.
+    drop(client);
+    drop(daemon);
+    std::fs::remove_file(&socket).ok();
+    let _restarted_daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+    client.send_command("l-restart", &json!({ "type": "list" }));
+    let list = client.read_response("l-restart");
+    assert_eq!(list["data"]["sessions"].as_array().map(Vec::len), Some(0));
 
     client.send_command(
         "s1",

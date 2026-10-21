@@ -213,3 +213,23 @@ Layering rules:
 ## References
 
 - Cursor Bugbot's PR review rules (`.cursor/BUGBOT.md`) mirror the standards in this file - update both whenever either changes.
+
+## Agent skills
+
+### Issue tracker
+
+Big Brother's own development issues/specs use this repository's GitHub
+Issues. Review finding issues are published to the watched repository's
+GitHub Issues; native trackers are deferred. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels plus the project labels `defer` and `prone`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo with root `CONTEXT.md` and `docs/adr/`. ADR
+numbering continues from the beta repository (`clingto7/BigBrother-beta`).
+The framework guidance in the sections above still applies to the crates
+this fork inherits. See `docs/agents/domain.md`.

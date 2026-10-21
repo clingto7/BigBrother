@@ -1,142 +1,144 @@
-<p align="center">
-  <a href="https://primeintellect.ai">
-    <picture>
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/40c36e38-c5bd-4c5a-9cb3-f7b902cd155d">
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8">
-      <img alt="Prime Intellect" src="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8" width="312" style="max-width: 100%;">
-    </picture>
-  </a>
-</p>
+# Big Brother
 
-<h3 align="center">
-Prime Agent: A Self-Improving RLM Harness
-</h3>
+Big Brother is a local, long-running code review agent for developers and small teams who want a second pair of eyes on every update to a repository.
 
-<p align="center">
-  <a href="#install">Documentation</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a>
-</p>
+It watches a dedicated Git worktree, fetches the tracked branch, and asks a persistent Prime Agent review session to inspect each new commit range. Reviews are read-only: Big Brother does not edit source files, rewrite commits, or act as a merge gate.
 
-<p align="center">
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  </a>
-  <a href="https://arxiv.org/abs/2608.23552">
-    <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
-  </a>
-</p>
+> **Beta status**
+>
+> The current beta targets one GitHub repository and one branch per monitored session. It is designed for macOS and Ubuntu/Debian Linux desktops. Multi-branch monitoring, automatic clone/setup, and non-fast-forward recovery are planned follow-ups.
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/104249?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-104249" target="_blank" rel="noopener noreferrer">
-    <img src="https://trendshift.io/api/badge/repositories/104249" alt="PrimeIntellect-ai%2Fprime-agent | Trendshift" width="250" height="55" />
-  </a>
-</p>
+## Why Big Brother
 
-Prime Agent is an open-source coding and research agent for general and long-running work. It is designed around two core abstractions:
+Most automated reviewers answer one pull request or one CI job. Big Brother is for a different workflow: keep a review worktree running in the background while you continue using your normal checkout and interactive agent sessions.
 
-- The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
-- The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
+- **Persistent review context** — one repository-scoped review session carries project policy, direction, and prior review state across ranges.
+- **Layered review** — requirements, project fit, and implementation quality can use separate review layers and models.
+- **Local control** — the observer, state, worktree, and service lifecycle live on your machine; you bring the model endpoint and Git credentials.
+- **Read-only boundary** — the review agent can inspect and reason about the repository, but the service does not modify project code.
+- **Durable delivery** — completed records can publish an advisory GitHub Commit Status (`big-brother/review`) and optional Bark notifications.
+- **Normal developer workflow stays intact** — the review worktree is separate from the checkout you edit every day, and user sessions continue through the existing Prime Agent daemon.
 
-## Install
+## How it compares
 
-Install the latest stable version with the one-command installer:
+| Project | Main job | Big Brother difference |
+| --- | --- | --- |
+| [reviewdog](https://github.com/reviewdog/reviewdog) | Convert linter and static-analysis output into review comments, annotations, or checks. | Big Brother runs an agent-led, repository-aware review with durable context; it complements deterministic linters rather than replacing them. |
+| [PR-Agent](https://github.com/The-PR-Agent/pr-agent) | Run AI analysis and suggestions for pull requests through repository integrations and commands. | Big Brother is a local branch watcher with a persistent review conversation and an operator-owned worktree; it does not require a PR event for every review range. |
+| [OpenHands](https://github.com/OpenHands/OpenHands) | General-purpose software development agent that can modify code and run tasks. | Big Brother narrows the control plane to continuous, read-only review and durable delivery. |
 
-```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
-```
+Choose Big Brother when you want background review of a repository you control, stable project context across reviews, and a separate review checkout. Choose reviewdog when deterministic tool output is the main input. Choose PR-Agent when PR-centric automation is the desired workflow. Choose OpenHands when the agent should actively implement changes.
 
-On Windows, install from PowerShell:
+## Requirements
 
-```powershell
-irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
-```
+- macOS or Ubuntu/Debian Linux with `launchd` or `systemd --user`.
+- Git and a dedicated, clean review worktree with an `origin` remote and an upstream branch.
+- A running Prime Agent daemon. Big Brother's observer and your interactive sessions share its Unix socket but remain separate sessions.
+- A configured Prime Agent model provider. Model credentials stay in Prime Agent's normal auth configuration.
+- Optional delivery credentials:
+  - `BIG_BROTHER_GITHUB_TOKEN` for Commit Status writes.
+  - `BARK_KEY` and optional `BARK_SERVER` for Bark notifications.
+- Rust and Cargo when building from source.
 
-The Windows installer downloads the latest stable Windows x64 build and verifies its checksum before installation.
+## Quick start from source
 
-## Why Prime Agent
-
-Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
-
-- **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
-- **Subagents are built in:** `rlm.spawn(...)` spawns real child agents for parallel or background work and returns their results programmatically.
-- **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
-- **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
-- **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
-- **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
-- **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
-
-## Clipboard over SSH and tmux
-
-Prime Agent uses the local clipboard tool (such as `pbcopy`) when available. In tmux it asks the attached tmux client to forward a clipboard buffer if that client advertises the `Ms` capability. This works with tmux's default `set-clipboard external`, unlike application-origin OSC 52. Without tmux, remote copies request delivery using OSC 52. Terminal requests cannot confirm that your local clipboard changed, so Prime Agent reports them as unconfirmed.
-
-Nested tmux servers and terminals may still block delivery. An outer tmux with `set-clipboard external` can reject the inner server's OSC 52. In that case, run `tmux set -s set-clipboard on` on the outer server, or use native terminal selection (Shift-drag in most terminals; Option-drag in iTerm2) followed by Cmd-C. macOS Terminal.app does not support OSC 52; iTerm2 requires its “Applications in terminal may access clipboard” setting.
-
-## Custom certificate authorities
-
-HTTPS requests trust your operating system's trust store together with the bundled Mozilla roots. For servers behind a custom CA, point `NODE_EXTRA_CA_CERTS` at a PEM bundle of your CA certificates — the same variable the Node/TypeScript build honors:
+Build the workspace and put the two binaries on your `PATH`:
 
 ```bash
-export NODE_EXTRA_CA_CERTS=/path/to/your-ca.pem
+cargo build --locked -p pa-cli --bin big-brother
+cargo build --locked -p pa-daemon --bin pa-daemon
+export PATH="$PWD/target/debug:$PATH"
 ```
 
-Each transport reads the variable once when its first client is initialized. The background daemon keeps the environment it started with, so run `prime-agent shutdown` after changing it.
-
-## Getting Started
-
-Start Prime Agent from the repository or directory you want it to work in:
+Prepare a review-only worktree. Do not use the checkout where you edit files daily:
 
 ```bash
-cd /path/to/project
-prime-agent
+git clone git@github.com:OWNER/REPOSITORY.git "$HOME/review-worktrees/REPOSITORY"
+cd "$HOME/review-worktrees/REPOSITORY"
+git switch main                         # or the repository's default branch
+git branch --set-upstream-to=origin/main main
 ```
 
-On first launch, run `/login` to choose a subscription or API-key provider. Prime Agent works in the current directory and can run commands and modify files there. Use a disposable clone, clean worktree, or another checkpoint you can inspect and restore.
-
-> [!WARNING]
-> Prime Agent executes model-generated Python and project commands with your user permissions. Its worker and kernel processes improve lifecycle isolation and recovery; they are **not** a security sandbox. Review changes and use trusted repositories, instructions, and skills only. Run untrusted code or instructions in an external sandbox or restricted environment.
-
-Useful commands:
+Make sure the worktree is clean, then enroll it. `--branch` is optional; without it Big Brother resolves `origin/HEAD`, then `main`, then `master`:
 
 ```bash
-prime-agent agents                   # Browse running, idle, and saved sessions
-prime-agent attach <agent>           # Reattach to a running session
-prime-agent --resume [path|id]       # Browse sessions or resume one directly
-prime-agent status                   # Inspect background service state
-prime-agent doctor [--fix]           # Inspect or repair background services
-prime-agent update [--force]         # Update Prime Agent
-prime-agent shutdown [--force]       # Stop every agent, worker, and background service
+big-brother init \
+  --repo "$HOME/review-worktrees/REPOSITORY" \
+  --main-model provider/model \
+  --layer requirements=provider/model \
+  --layer project-fit=provider/model \
+  --layer implementation=provider/model
 ```
 
-## Built for Long-Running Work
-Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
+The existing Prime Agent daemon must be running before `init`. If you manage it manually, use the same agent directory and socket for both processes:
 
-- **Continual Harness:** `/refine` can persist focused, reviewable lessons as supplemental prompts, memories, reusable skill descriptions, or subagent specifications, with recorded refinement history. It does not replace packaging and reviewing new executable skills.
-- **Direct agent-to-agent communication:** running agents and retained subagents can discover one another, exchange messages, and steer active work.
-- **Daemon-backed continuity:** active sessions, Python REPL state, schedules, and subagents keep running when the terminal detaches and can be reattached later.
-- **Heartbeats and schedules:** `/heartbeat`, `rlm_heartbeat`, and `prime-agent schedule` can re-enter a session periodically or at a specific time.
-- **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
-- **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates. A passed gate checks only what that gate verifies; reaching a limit does not imply task success.
+```bash
+pa-daemon supervisor --agent-dir "$HOME/.prime/agent"
+```
 
-## Contributing
+Install the background observer. The script creates a macOS LaunchAgent or Linux systemd user unit, keeps the observer in the foreground, and leaves secrets outside the service definition:
 
-Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
+```bash
+scripts/big-brother-service.sh install \
+  --agent-dir "$HOME/.prime/agent" \
+  --binary "$(command -v pa-daemon)"
+```
+
+Inspect enrollment and review progress:
+
+```bash
+big-brother status --repo "$HOME/review-worktrees/REPOSITORY"
+```
+
+Remove the platform service without deleting review records or the worktree:
+
+```bash
+scripts/big-brother-service.sh uninstall
+```
+
+## Runtime behavior
+
+On each interval, the observer:
+
+1. fetches `origin/<branch>` through Git's configured credential helper;
+2. fast-forwards the dedicated local branch and worktree;
+3. admits the new range after the previous range settles;
+4. wakes the repository's persistent review session;
+5. harvests the layered answers and synthesis;
+6. stores the review record before attempting delivery.
+
+The default interval is 30 seconds. A dirty worktree, fetch failure, wrong checked-out branch, or non-fast-forward update is recorded and skipped without overwriting files. A repository with no fetch upstream remains usable in local-observation mode.
+
+The observer is a separate foreground process. `launchd` or `systemd --user` owns restart and logs; the Prime Agent daemon owns model sessions. Your interactive Prime Agent sessions continue using the same daemon independently.
+
+## Configuration and boundaries
+
+- Review profile and operational state live under the Prime Agent agent directory, not inside the watched repository.
+- `.big-brother/` contains only minimal project-understanding assets in the worktree.
+- Git remote credentials come from SSH agent or Git credential helpers.
+- GitHub Commit Status and Bark are optional channels. Missing credentials disable their channel.
+- Big Brother sends review material to the configured model endpoint. Do not enroll repositories whose content may not leave your approved processing boundary.
+- A successful review is advisory. Exhausted review attempts do not produce a success status.
+
+## Configure with another agent
+
+Give your setup agent this prompt:
+
+> Configure Big Brother for this repository. Use a dedicated clean worktree, separate from my daily checkout. Verify that `big-brother`, `pa-daemon`, and the Prime Agent daemon are available. Initialize the worktree with `big-brother init` using the existing daemon socket and my chosen review models, then install the platform service with `scripts/big-brother-service.sh install --binary "$(command -v pa-daemon)"`. Do not put tokens or secret values in a plist, systemd unit, repository file, or commit. Show the service path, agent directory, tracked branch, and `big-brother status` output. Stop if the worktree is dirty or is the same checkout I use for daily editing.
+
+## Development
+
+Run focused checks from a short temporary directory on macOS:
+
+```bash
+TMPDIR=/tmp/bbtest/ cargo test -p pa-daemon --lib --locked -- big_brother --test-threads=1
+TMPDIR=/tmp/bbtest/ cargo test -p pa-daemon --test big_brother_init_e2e --locked -- --test-threads=1
+TMPDIR=/tmp/bbtest/ cargo test -p pa-daemon --test big_brother_delivery_e2e --locked -- --test-threads=1
+cargo fmt --all --check
+```
+
+The project records architectural decisions in [`docs/adr`](docs/adr) and domain language in [`CONTEXT.md`](CONTEXT.md).
 
 ## License
 
-Prime Agent is fully open source and released under the [MIT License](LICENSE).
-
-## Citation
-
-If you use this codebase in your research, please cite Prime Agent:
-
-```bibtex
-@article{karten2026prime,
-  title={Prime Agent: A Self-Improving RLM Harness},
-  author={Karten, Seth and Zhang, Alex L. and Thomas, Kevin and Müller, Sebastian and Bakouch, Elie and Auras, Daniel and Senghaas, Mika and Obeid, Fares and Dunas, Konstantin and Hagemann, Johannes and Jaghouar, Sami},
-  journal={arXiv preprint arXiv:2608.23552},
-  year={2026}
-}
-```
-
-Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+Big Brother is released under the [MIT License](LICENSE).

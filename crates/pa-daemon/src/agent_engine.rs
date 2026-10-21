@@ -185,6 +185,15 @@ pub struct AgentSessionEngine {
     /// create's flags survive every replacement; a mid-session `/model` switch
     /// belongs to the session it switched.
     initial_selection: std::sync::RwLock<EngineModelSelection>,
+    /// `true` when the live selection's model came from an explicit create
+    /// flag rather than the process-env spawn fallback: only that provenance
+    /// may beat the saved session's pinned model at restore.
+    create_flagged_model: std::sync::atomic::AtomicBool,
+    /// The repository review profile (ADR 0024) when this session is that
+    /// repository's review main session: every build re-derives the
+    /// restricted tool boundary from it. `None` for operator sessions.
+    review_profile:
+        std::sync::RwLock<Option<std::sync::Arc<crate::big_brother::profile::ReviewProfile>>>,
     /// The resolved effective thinking level, computed once at create so
     /// summary/state polls during a live turn stay side-effect-free.
     effective_thinking: std::sync::RwLock<Option<pa_types::ai::ModelThinkingLevel>>,

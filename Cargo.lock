@@ -1570,6 +1570,7 @@ dependencies = [
  "pa-telemetry",
  "pa-types",
  "proptest",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

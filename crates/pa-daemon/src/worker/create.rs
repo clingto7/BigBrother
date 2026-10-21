@@ -121,6 +121,61 @@ impl Worker {
             .and_then(Value::as_str)
             .unwrap_or("/")
             .to_string();
+        // The review-profile marker (ADR 0024): a session explicitly created
+        // as the repository's review main session resolves its profile here —
+        // one resolution, re-read by every engine build. A marked create
+        // without a usable profile fails loudly: the restricted review
+        // boundary is never silently downgraded to a full session.
+        if payload.get("bigBrotherReview").and_then(Value::as_bool) == Some(true) {
+            let profile = match crate::big_brother::profile::resolve_profile(
+                &self.config.agent_dir,
+                std::path::Path::new(&cwd),
+            ) {
+                Ok(Some(profile)) => std::sync::Arc::new(profile),
+                Ok(None) => {
+                    return response_failure(
+                        None,
+                        "create",
+                        &format!(
+                            "bigBrotherReview requested but no review profile is configured for {cwd}"
+                        ),
+                        None,
+                    );
+                }
+                Err(error) => {
+                    return response_failure(
+                        None,
+                        "create",
+                        &format!("review profile: {error}"),
+                        None,
+                    );
+                }
+            };
+            // A fresh review session seeds its model from the profile
+            // (enrollment semantics); a wake create must not re-seed —
+            // the session file owns the model from creation on, so the
+            // cold-wake restore wins over any ambient default.
+            let fresh_session = !session_path.as_deref().is_some_and(std::path::Path::exists);
+            if !flagged_model && fresh_session {
+                if let Some(model) = &profile.main_model {
+                    let (provider, model_id) = match model.split_once('/') {
+                        Some((provider, model_id)) => {
+                            (Some(provider.to_string()), model_id.to_string())
+                        }
+                        None => (None, model.clone()),
+                    };
+                    self.engine.configure_create_model(EngineModelSelection {
+                        provider,
+                        model: Some(model_id),
+                        api_key: None,
+                        thinking: None,
+                    });
+                }
+            }
+            if let Some(agent_engine) = &self.agent_engine {
+                agent_engine.set_review_profile(profile);
+            }
+        }
         let session_dir = match payload.get("sessionDir").and_then(Value::as_str) {
             Some(dir) => match paths::expand_tilde(dir) {
                 Ok(expanded) => expanded,

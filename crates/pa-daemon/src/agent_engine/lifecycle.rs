@@ -18,6 +18,18 @@ use super::{
 pub(crate) const BARE_SKILL_INVOCATION_INSTRUCTION: &str = "The user invoked this skill with no task text - ask what they want before executing any protocol inside it.";
 
 impl AgentSessionEngine {
+    /// Adopt the repository review profile (the `bigBrotherReview` create
+    /// marker's resolution): every later build re-derives the restricted
+    /// review tool boundary from it.
+    pub(crate) fn set_review_profile(
+        &self,
+        profile: std::sync::Arc<crate::big_brother::profile::ReviewProfile>,
+    ) {
+        *self.review_profile.write().expect("review profile lock") = Some(profile);
+    }
+}
+
+impl AgentSessionEngine {
     /// Build the engine: the shared async runtime, the model selection
     /// (create config), the supervisor link, the children registry, and the
     /// MCP store.
@@ -153,6 +165,8 @@ impl AgentSessionEngine {
             restored_model: std::sync::Mutex::new(None),
             startup_scope: std::sync::Mutex::new(None),
             initial_selection: std::sync::RwLock::new(selection),
+            create_flagged_model: std::sync::atomic::AtomicBool::new(false),
+            review_profile: std::sync::RwLock::new(None),
             effective_thinking: std::sync::RwLock::new(None),
             service_tier: std::sync::RwLock::new(None),
             session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -1005,7 +1019,30 @@ impl AgentSessionEngine {
             .lock()
             .expect("late agent message sink lock")
             .clone();
-        pa_core::session_engine::engine::create_session(SessionEngineConfig {
+        // The review main session (ADR 0024): the create marker resolved a
+        // repository profile, and only a depth-0 session carries it — RLM
+        // children stay full sessions until the review-tools increment
+        // gives them their own restricted boundary.
+        let review_profile = self
+            .review_profile
+            .read()
+            .expect("review profile lock")
+            .clone()
+            .filter(|_| self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed) == 0);
+        let review_tools = self
+            .children
+            .iter()
+            .filter(|_| review_profile.is_some())
+            .cloned()
+            .map(|children| {
+                crate::big_brother::dispatch::dispatch_review_tool(
+                    children,
+                    std::sync::Arc::clone(review_profile.as_ref().expect("profile present")),
+                )
+            })
+            .collect::<Vec<_>>();
+        let review_session = !review_tools.is_empty();
+        let session_config = SessionEngineConfig {
             on_late_sent_agent_message,
             semantic_edges,
             telemetry,
@@ -1018,9 +1055,17 @@ impl AgentSessionEngine {
             model: Some(agent_model),
             thinking_level: Some(map_thinking_level(self.effective_thinking())),
             stream_fn: Some(stream_fn),
-            // Model tools: `python_repl` only; the engine adds the kernel-backed `python_repl` tool itself.
-            tools: vec![],
-            custom_system_prompt: create_resources.system_prompt,
+            // The normal engine adds `python_repl`; the review profile exposes
+            // only the supplied review tools.
+            tools: review_tools,
+            // The review profile owns the conductor prompt (ADR 0026):
+            // derived from the profile at every build, so a cold wake
+            // rebuilds it — create-config system prompts do not survive
+            // daemon restarts.
+            custom_system_prompt: review_profile
+                .as_ref()
+                .map(|profile| crate::big_brother::prompt::conductor_system_prompt(profile))
+                .or(create_resources.system_prompt),
             prompt_guidelines: create_resources.append_system_prompt,
             generic_mcp_servers: vec![],
             allow_recursion: None,
@@ -1040,7 +1085,7 @@ impl AgentSessionEngine {
             daemonless: false,
             model_info: Some(model.clone()),
             // Prewarm; the depth gate keeps subagent workers lazy.
-            prewarm_ipython_kernel: Some(true),
+            prewarm_ipython_kernel: Some(!review_session),
             on_background_work_settled,
             // The worker-installed purge withdraws queued minted continuations.
             queued_goal_context_purge,
@@ -1114,9 +1159,13 @@ impl AgentSessionEngine {
                 wiring.binding = self.kernel_cron_binding().or(wiring.binding);
                 wiring
             }),
-        })
-        .await
-        .inspect(|engine| {
+        };
+        let engine = if review_session {
+            pa_core::session_engine::engine::create_review_session(session_config).await
+        } else {
+            pa_core::session_engine::engine::create_session(session_config).await
+        };
+        engine.inspect(|engine| {
             // A queue-mode switch that landed mid-build wrote only the live slot: re-apply the
             // modes so the first build never serves a stale one.
             let (steering_mode, follow_up_mode) = {

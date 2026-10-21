@@ -188,7 +188,23 @@ fn mcp_gating_blocking(
 ///
 /// Panics if the MCP manager mutex is poisoned while wiring telemetry
 /// reporting.
-pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
+pub async fn create_session(config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
+    create_session_with_tool_policy(config, true).await
+}
+
+/// Experimental Big Brother reviewer profile: expose only supplied tools.
+///
+/// # Errors
+///
+/// Returns the same session construction errors as [`create_session`].
+pub async fn create_review_session(config: SessionEngineConfig) -> anyhow::Result<SessionEngine> {
+    create_session_with_tool_policy(config, false).await
+}
+
+async fn create_session_with_tool_policy(
+    mut config: SessionEngineConfig,
+    include_ipython: bool,
+) -> anyhow::Result<SessionEngine> {
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
     // context both come from the session manager.
@@ -444,7 +460,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
-    if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
+    if include_ipython && !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
         let definition = crate::tools::ipython::create_ipython_tool_definition(
             &cwd.to_string_lossy(),
             super::runtime_wiring::ipython_tool_options(

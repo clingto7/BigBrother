@@ -23,6 +23,13 @@ serde_json = { workspace = true }
 name = "prime-agent"
 path = "src/main.rs"
 
+# The Big Brother product CLI (enrollment and the operator query surface);
+# the command logic lives in pa-daemon's big_brother modules, this binary
+# only parses arguments and prints results.
+[[bin]]
+name = "big-brother"
+path = "src/bin/big_brother.rs"
+
 [dev-dependencies]
 tempfile = "3"
 base64 = "0.22"

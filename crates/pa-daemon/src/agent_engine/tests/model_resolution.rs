@@ -500,14 +500,60 @@ async fn create_flags_beat_the_saved_session_model() {
     let agent_dir = dir.path().join("agent");
     write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
     let path = session_file_pinning_private_model(dir.path());
-    let engine = restore_test_engine(dir.path(), Some("battery"), Some("mock-1"));
+    let engine = restore_test_engine(dir.path(), None, None);
     engine.set_session_file(path.clone());
+    // The genuine create-flag path: explicit wire flags fold through
+    // `configure_create_model` (worker `handle_create`), never the
+    // engine-construction spawn fallback.
+    engine.configure_create_model(EngineModelSelection {
+        provider: Some("battery".to_string()),
+        model: Some("mock-1".to_string()),
+        api_key: None,
+        thinking: None,
+    });
 
     engine.restore_session_model(&path, None).await;
     let resolved = engine.resolve_registry_model().expect("flagged resolution");
     assert_eq!(resolved.provider, "battery");
     assert_eq!(resolved.id, "mock-1");
     assert!(engine.model_fallback_message().is_none());
+}
+
+/// The fork's cold-wake contract (ADR 0023): a daemon worker seeds the
+/// process env pair into the engine config, but an unflagged wake must
+/// restore the file's pinned model over that spawn fallback — the env
+/// model is indistinguishable from a create flag in the old gate, so the
+/// woken session silently ran the daemon default.
+#[tokio::test]
+async fn env_seeded_model_yields_to_the_saved_session_model_on_wake() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_prime_auth(&agent_dir);
+    let pi = pi_payload();
+    let layer_a = serde_json::json!({ "schemaVersion": 1, "models": [] }).to_string();
+    let server = MockCatalogServer::start(vec![
+        catalog_ok_json(&layer_a),
+        catalog_ok_json(&pi),
+        catalog_ok_json(&pi),
+    ])
+    .await;
+    install_loopback_catalog(&agent_dir, &server);
+    let path = session_file_pinning_private_model(dir.path());
+    // Engine-construction seeding is exactly the worker's env pair
+    // (`PRIME_AGENT_MODEL_PROVIDER` / `PRIME_AGENT_MODEL`).
+    let engine = restore_test_engine(dir.path(), Some("prime-inference"), Some("z-ai/glm-5.3"));
+    engine.set_session_file(path.clone());
+
+    engine.restore_session_model(&path, None).await;
+    let restored = engine
+        .resolve_registry_model()
+        .expect("restored resolution");
+    assert_eq!(restored.provider, "prime-inference");
+    assert_eq!(restored.id, "internal/glm-5.3-fast");
+    assert!(
+        engine.model_fallback_message().is_none(),
+        "the env fallback yields without a fallback record"
+    );
 }
 
 #[tokio::test]

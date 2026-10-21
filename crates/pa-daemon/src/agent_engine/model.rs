@@ -109,13 +109,35 @@ impl AgentSessionEngine {
         }
         // An explicit create flag wins for the MODEL — the saved thinking
         // above still applies, and the restore skips the model's readiness
-        // window entirely.
-        if self.current_selection().model.is_some() {
+        // window entirely. Provenance matters: a selection model without the
+        // flag is the spawn fallback (the worker's process env pair), which
+        // must not preempt the file's pinned model on a cold wake (the
+        // fork's restoration contract; upstream let the env pair win).
+        if self
+            .create_flagged_model
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return;
         }
         let Some((provider, model_id)) = saved.model else {
             return;
         };
+        // Drop the spawn fallback's provider/model from both selection slots
+        // so the file's pin resolves and a later reset-to-fallback cannot
+        // resurrect it; the api key and thinking level stay.
+        {
+            let mut current = self.selection.write().expect("model selection lock");
+            current.provider = None;
+            current.model = None;
+        }
+        {
+            let mut initial = self
+                .initial_selection
+                .write()
+                .expect("initial selection lock");
+            initial.provider = None;
+            initial.model = None;
+        }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));

@@ -378,6 +378,12 @@ impl SessionEngine for AgentSessionEngine {
     fn configure_create_model(&self, selection: EngineModelSelection) {
         // The create's explicit flags fold into the runtime config (TS
         // `mergeAgentSessionRuntimeConfig`) and must survive the restore reset.
+        // Only an explicitly flagged model may beat the saved session's pin;
+        // the env-seeded spawn fallback may not.
+        self.create_flagged_model.store(
+            selection.model.is_some(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         {
             let mut initial = self
                 .initial_selection
