@@ -926,6 +926,13 @@ jobs:
       #   - AUDIT SURFACE: beta archives retain every release asset on R2;
       #     stable releases and the rolling nightly attach them on GitHub.
       - name: Publish the R2 channel (the channel serves no GitHub URL)
+        # The nightly's opt-in posture (the HAS_RELEASE_BOT precedent): with
+        # no R2 base configured the release still publishes on GitHub - the
+        # per-tag attach (stable) and the rolling nightly refresh (beta) -
+        # and this step skips; a configured-but-broken R2 still fails loudly
+        # below. A fork without the operator's R2 wiring is the intended
+        # skip case, not an error.
+        if: vars.R2_PUBLIC_BASE_URL != ''
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
