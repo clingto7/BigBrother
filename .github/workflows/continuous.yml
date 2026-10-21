@@ -13,6 +13,12 @@ on:
   push:
     branches:
       - main
+  # The operator's supervised build (the nightly's dispatch precedent): a
+  # tip whose push run never started (a fork whose push triggers were
+  # suspended at push time) still gets its proven-built evidence - the
+  # release's beta route resolves the run by head_sha on main, never by
+  # event, so a dispatched build is as consumable as a pushed one.
+  workflow_dispatch: {}
 
 permissions: {}
 
