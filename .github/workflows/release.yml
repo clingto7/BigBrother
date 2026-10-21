@@ -33,6 +33,12 @@ on:
       # channels pa-core::update::version::UpdateChannel reads.
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-beta*"
+  # The operator's supervised publish (the continuous/nightly dispatch
+  # precedent): dispatched ON THE TAG REF (`--ref vX.Y.Z[-beta.N]`), so
+  # github.ref_name / ref_type carry the tag exactly as a tag push would
+  # and every gate below (tag-check, the route split, the channel) reads
+  # the same inputs. For a tag whose push event never started this run.
+  workflow_dispatch: {}
 
 permissions: {}
 
