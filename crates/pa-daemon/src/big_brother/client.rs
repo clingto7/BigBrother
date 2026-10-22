@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};
+use pa_types::platform::transport::{connect_transport, AsyncReadHalf, AsyncWriteHalf};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -14,24 +15,22 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A connected daemon protocol client (newline-delimited JSON, protocol
-/// version 7).
+/// version 7). Holds the platform transport's erased halves (a Unix
+/// socket, a Windows named pipe) like every other in-crate client.
 pub(crate) struct DaemonClient {
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: tokio::net::unix::OwnedWriteHalf,
+    reader: BufReader<Box<dyn AsyncReadHalf>>,
+    writer: Box<dyn AsyncWriteHalf>,
     next_id: u64,
 }
 
 impl DaemonClient {
     /// Connect and consume the hello line.
     pub(crate) async fn connect(socket_path: &Path) -> Result<Self> {
-        let stream = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            tokio::net::UnixStream::connect(socket_path),
-        )
-        .await
-        .context("timed out connecting to the daemon")?
-        .with_context(|| format!("connecting to daemon socket {}", socket_path.display()))?;
-        let (read_half, write_half) = stream.into_split();
+        let stream = tokio::time::timeout(REQUEST_TIMEOUT, connect_transport(socket_path))
+            .await
+            .context("timed out connecting to the daemon")?
+            .with_context(|| format!("connecting to daemon socket {}", socket_path.display()))?;
+        let (read_half, write_half) = stream.split();
         let mut client = DaemonClient {
             reader: BufReader::new(read_half),
             writer: write_half,
