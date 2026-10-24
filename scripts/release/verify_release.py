@@ -48,6 +48,8 @@ from assemble_artifacts import (
 # Windows target), resolved in `main` via `binary_name_for_target`.
 EXPECTED_TOP_LEVEL = {
     "prime-agent",
+    "big-brother",
+    "pa-daemon",
     "prime-agent-runtime",
     "skills",
     "LICENSE",
@@ -105,6 +107,10 @@ def main() -> int:
 
     binary_name = binary_name_for_target(args.target)
     expected_top_level = (EXPECTED_TOP_LEVEL - {"prime-agent"}) | {binary_name}
+    if "-windows-" in args.target:
+        expected_top_level.discard("big-brother")
+        expected_top_level.discard("pa-daemon")
+        expected_top_level |= {"big-brother.exe", "pa-daemon.exe"}
     if binary_name != "prime-agent.exe":
         expected_top_level |= NATIVE_COMPAT_TOP_LEVEL
     expected_top_level |= (
@@ -195,6 +201,14 @@ def main() -> int:
             fail(f"staged {binary_name} is not executable")
         if entries[archive_name]["executableSha256"] != sha256_file(binary):
             fail("executableSha256 in manifest.json does not match the staged binary")
+        companions = entries[archive_name].get("companions", [])
+        expected_companions = {"big-brother.exe", "pa-daemon.exe"} if "-windows-" in args.target else {"big-brother", "pa-daemon"}
+        if {item["name"] for item in companions} != expected_companions:
+            fail(f"manifest companions do not match the packaged tools: {companions!r}")
+        for companion in companions:
+            path = scratch / companion["name"]
+            if not path.is_file() or sha256_file(path) != companion["sha256"]:
+                fail(f"companion hash mismatch for {companion['name']}")
         env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}
         run = subprocess.run(
             [str(binary), "--version"],

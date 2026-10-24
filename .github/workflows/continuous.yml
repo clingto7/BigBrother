@@ -154,11 +154,10 @@ jobs:
           # the new key builds cold; the marker moves only with reviewed
           # baseline changes (same protocol as the image digest below).
           key: ${{ matrix.target }}-glibc235
-      # Only the shipped binary links here: the job packages `prime-agent`
-      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
-      # no consumer (~26% of the build step, measured).
+      # Build every executable shipped in the platform archive: Prime Agent,
+      # the Big Brother operator CLI, and the standalone daemon service binary.
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent --bin big-brother -p pa-daemon --bin pa-daemon
       - name: Split the shipped binary + split-debug decoder (Option C posture)
         run: |
           set -euo pipefail
@@ -202,6 +201,8 @@ jobs:
             --target "${{ matrix.target }}" \
             --sha "${GITHUB_SHA}" \
             --binary "target/${{ matrix.target }}/dist/prime-agent" \
+            --big-brother-binary "target/${{ matrix.target }}/release/big-brother" \
+            --daemon-binary "target/${{ matrix.target }}/release/pa-daemon" \
             --decoder "target/${{ matrix.target }}/dist/prime-agent-${version}-$(case "${{ matrix.target }}" in x86_64*) echo linux-x64;; aarch64*) echo linux-arm64;; esac).debug.gz" \
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
@@ -268,11 +269,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
-      # Only the shipped binary links here: the job packages `prime-agent`
-      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
-      # no consumer (~26% of the build step, measured).
+      # Build every executable shipped in the platform archive: Prime Agent,
+      # the Big Brother operator CLI, and the standalone daemon service binary.
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent --bin big-brother -p pa-daemon --bin pa-daemon
       - name: Generate bundled catalog assets (fixture, offline-safe)
         run: |
           set -euo pipefail
@@ -289,6 +289,8 @@ jobs:
             --target "${{ matrix.target }}" \
             --sha "${GITHUB_SHA}" \
             --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --big-brother-binary "target/${{ matrix.target }}/release/big-brother" \
+            --daemon-binary "target/${{ matrix.target }}/release/pa-daemon" \
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"

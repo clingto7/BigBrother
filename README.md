@@ -38,15 +38,41 @@ Choose Big Brother when you want background review of a repository you control, 
 - Optional delivery credentials:
   - `BIG_BROTHER_GITHUB_TOKEN` for Commit Status writes.
   - `BARK_KEY` and optional `BARK_SERVER` for Bark notifications.
-- Rust and Cargo when building from source.
+- Rust and Cargo only when building from source.
+
+## Install the nightly release
+
+Nightly release archives contain `prime-agent`, `big-brother`, and `pa-daemon` for the same platform. `big-brother` manages enrollment and status, `pa-daemon supervisor` serves Prime Agent sessions, and `pa-daemon observer` runs the review watcher. The observer is a separate process; the service script below installs it.
+
+Download the archive for your platform from the [nightly release](https://github.com/clingto7/BigBrother/releases/tag/nightly). Check its SHA-256 against the matching row in `SHA256SUMS`, then extract all three executables into a directory on `PATH`:
+
+```bash
+mkdir -p "$HOME/.local/bin" "$HOME/.cache/big-brother-release"
+cd "$HOME/.cache/big-brother-release"
+# Download the platform archive and SHA256SUMS from the nightly release page.
+archive="prime-agent-VERSION-PLATFORM.tar.gz"
+expected="$(awk -v name="$archive" '$2 == name { print $1 }' SHA256SUMS)"
+actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
+test -n "$expected" && test "$actual" = "$expected"
+tar -xzf "$archive" -C "$HOME/.local/bin" prime-agent big-brother pa-daemon
+```
+
+Replace `VERSION` and `PLATFORM` with the archive name shown on the release page (for example `0.10.1-beta.21` and `darwin-arm64`). Add `~/.local/bin` to `PATH` if needed. On Windows, the executable names end in `.exe`.
+
+Start the shared Prime Agent supervisor:
+
+```bash
+pa-daemon supervisor --agent-dir "$HOME/.prime/agent"
+```
 
 ## Quick start from source
 
-Build the workspace and put the two binaries on your `PATH`:
+Build the workspace and put the three binaries on your `PATH`:
 
 ```bash
 cargo build --locked -p pa-cli --bin big-brother
 cargo build --locked -p pa-daemon --bin pa-daemon
+cargo build --locked -p pa-cli --bin prime-agent
 export PATH="$PWD/target/debug:$PATH"
 ```
 

@@ -71,6 +71,8 @@ from native_compat import stage_native_compat
 BINARY_PLACEHOLDER = "prime-agent"
 STAGED_ENTRIES = [
     BINARY_PLACEHOLDER,
+    "big-brother",
+    "pa-daemon",
     "prime-agent-runtime",
     "skills",
     "LICENSE",
@@ -200,6 +202,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--binary", type=Path, default=None)
+    parser.add_argument("--big-brother-binary", type=Path, default=None)
+    parser.add_argument("--daemon-binary", type=Path, default=None)
     parser.add_argument("--decoder", type=Path, default=None,
                         help="separate Linux .debug.gz sidecar from split_debug.py")
     parser.add_argument("--runtime-dir", type=Path, default=None)
@@ -227,6 +231,17 @@ def resolve_binary(args: argparse.Namespace) -> Path:
             return candidate
     listed = ", ".join(str(candidate) for candidate in candidates)
     fail(f"no executable {name} binary found (looked at: {listed}); build first")
+
+
+def resolve_companion(path: Path | None, name: str, args: argparse.Namespace) -> Path:
+    candidates = [path] if path is not None else [
+        args.repo_root / "target" / args.target / "release" / name,
+        args.repo_root / "target" / "release" / name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    fail(f"no executable {name} binary found (looked at: {', '.join(map(str, candidates))}); build first")
 
 
 def validate_version(version: str) -> None:
@@ -283,6 +298,11 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     """
     binary_name = binary_name_for_target(args.target)
     binary = resolve_binary(args)
+    suffix = ".exe" if "-windows-" in args.target else ""
+    companions = {
+        f"big-brother{suffix}": resolve_companion(getattr(args, "big_brother_binary", None), f"big-brother{suffix}", args),
+        f"pa-daemon{suffix}": resolve_companion(getattr(args, "daemon_binary", None), f"pa-daemon{suffix}", args),
+    }
     runtime_dir = args.runtime_dir or (args.repo_root / "prime-agent-runtime")
     sources = {
         binary_name: binary,
@@ -314,6 +334,9 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
                 shutil.copytree(source, target_path)
         else:
             shutil.copy2(source, target_path)
+    for name, source in companions.items():
+        shutil.copy2(source, staging / name)
+        os.chmod(staging / name, 0o755)
     # `chmod` is a no-op beyond the read-only bit on Windows hosts (the
     # exec bit the tar member filter re-pins below); on POSIX it makes the
     # staged binary executable for the `--version` probes.
@@ -333,8 +356,11 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     catalog_facts = validate_bundled_catalog_dir(catalog_assets)
     for name in BUNDLED_CATALOG_FILES:
         shutil.copyfile(catalog_assets / name, staging / name)
-    payload = [binary_name if entry == BINARY_PLACEHOLDER else entry
-               for entry in STAGED_ENTRIES]
+    payload = [
+        binary_name if entry == BINARY_PLACEHOLDER else f"{entry}{suffix}"
+        if entry in {"big-brother", "pa-daemon"} else entry
+        for entry in STAGED_ENTRIES
+    ]
     manifest = {
         "name": "prime-agent",
         "version": stamped_version or args.version,
@@ -354,6 +380,10 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     return {
         "binary_name": binary_name,
         "executable_sha256": sha256_file(staging / binary_name),
+        "companions": [
+            {"name": name, "sha256": sha256_file(staging / name)}
+            for name in sorted(companions)
+        ],
         "payload": payload,
         "catalog_assets": catalog_facts,
     }
@@ -377,7 +407,7 @@ def _deterministic_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
     member.mtime = 0
     if member.isdir():
         member.mode = 0o755
-    elif member.name == "prime-agent" or member.name == "prime-agent.exe":
+    elif member.name in {"prime-agent", "prime-agent.exe", "big-brother", "big-brother.exe", "pa-daemon", "pa-daemon.exe"}:
         member.mode = 0o755
     else:
         member.mode = 0o644
@@ -500,6 +530,7 @@ def main() -> int:
         "file": archive_name,
         "sha256": archive_sha256,
         "executableSha256": facts["executable_sha256"],
+        "companions": facts["companions"],
     }
 
     # Merge-or-write semantics so a per-target run in each CI build job can be

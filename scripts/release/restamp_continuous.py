@@ -207,6 +207,10 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
         if sha256_file(staging / "prime-agent") != binary["executableSha256"]:
             fail(f"{incoming.name}: the staged binary does not match the "
                  "manifest's executableSha256")
+        for companion in binary.get("companions", []):
+            path = staging / companion["name"]
+            if not path.is_file() or sha256_file(path) != companion["sha256"]:
+                fail(f"{incoming.name}: companion hash mismatch for {companion['name']}")
         validate_bundled_catalog_dir(staging)
 
         # 4. The runtime version manifest moves to the release version; the
