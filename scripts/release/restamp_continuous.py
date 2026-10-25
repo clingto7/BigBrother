@@ -78,7 +78,17 @@ def fail(message: str) -> None:
 
 
 def host_target() -> str | None:
-    return HOST_TARGETS.get((platform.system().lower(), platform.machine()))
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    # Rust names the OS "macos" (installer.rs `target_for`) while Python's
+    # platform.system() reports "Darwin", and macOS reports the arch as
+    # "arm64" where the triples (and Linux) say "aarch64". Without both
+    # folds no macOS host ever matches and the livecheck silently skips.
+    if system == "darwin":
+        system = "macos"
+    if machine == "arm64":
+        machine = "aarch64"
+    return HOST_TARGETS.get((system, machine))
 
 
 def read_sums(path: Path) -> dict[str, str]:
