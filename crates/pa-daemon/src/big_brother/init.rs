@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context as _, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::big_brother::client::DaemonClient;
 use crate::big_brother::git;
@@ -126,6 +126,9 @@ pub async fn run_init(options: InitOptions) -> Result<InitOutcome> {
     // Conductor: created through the daemon protocol carrying the review
     // marker (ADR 0024); a roster hit by wake name means an earlier
     // enrollment already created it, and init never creates a second one.
+    // The profile's mainModel rides the create's explicit model flags —
+    // without them the conductor falls to the settings default and every
+    // review turn runs on an operator-unintended model.
     let sessions = client.list_sessions().await?;
     let created_conductor = !sessions.iter().any(|row| {
         row.get("sessionName").and_then(|value| value.as_str())
@@ -133,11 +136,11 @@ pub async fn run_init(options: InitOptions) -> Result<InitOutcome> {
     });
     if created_conductor {
         client
-            .request(json!({
-                "type": "create",
-                "name": profile.session_name,
-                "config": { "cwd": git_root, "bigBrotherReview": true },
-            }))
+            .request(conductor_create_request(
+                &profile.session_name,
+                profile.main_model.as_deref(),
+                &git_root,
+            ))
             .await
             .context("creating the review conductor session")?;
     }
@@ -153,6 +156,34 @@ pub async fn run_init(options: InitOptions) -> Result<InitOutcome> {
         profile_path,
         assets_dir,
     })
+}
+
+/// The conductor's create RPC: the review marker (ADR 0024) plus the
+/// profile's mainModel on the create's explicit model flags. Without the
+/// explicit flags the worker pins its default model instead — the settings
+/// default — and every review turn runs on an operator-unintended model.
+fn conductor_create_request(
+    session_name: &str,
+    main_model: Option<&str>,
+    git_root: &std::path::Path,
+) -> Value {
+    let mut request = json!({
+        "type": "create",
+        "name": session_name,
+        "config": { "cwd": git_root, "bigBrotherReview": true },
+    });
+    if let Some(main_model) = main_model {
+        match main_model.split_once('/') {
+            Some((provider, model)) => {
+                request["provider"] = json!(provider);
+                request["model"] = json!(model);
+            }
+            None => {
+                request["model"] = json!(main_model);
+            }
+        }
+    }
+    request
 }
 
 /// The repository's review profile: a present one validates and wins; an
@@ -362,6 +393,43 @@ mod tests {
         options.main_model = None;
         let error = build_profile(&options, &git_root).unwrap_err();
         assert!(error.to_string().contains("--main-model"), "{error}");
+    }
+
+    #[test]
+    fn the_conductor_create_carries_the_profile_main_model() {
+        // The create's explicit model flags are the only channel that pins
+        // the conductor to the profile's mainModel; the worker's default
+        // resolution (settings default, then the first available model)
+        // is what an unflagged create lands on — the beta.22 regression.
+        let (_dir, git_root) = watched_repo();
+        let request = conductor_create_request(
+            "review-watched-repo",
+            Some("deepseek/deepseek-v4-flash"),
+            &git_root,
+        );
+        assert_eq!(request["type"], "create");
+        assert_eq!(request["name"], "review-watched-repo");
+        assert_eq!(request["provider"], "deepseek");
+        assert_eq!(request["model"], "deepseek-v4-flash");
+        assert_eq!(request["config"]["bigBrotherReview"], true);
+        assert_eq!(request["config"]["cwd"], json!(git_root));
+    }
+
+    #[test]
+    fn a_bare_main_model_rides_the_create_without_a_provider() {
+        let (_dir, git_root) = watched_repo();
+        let request =
+            conductor_create_request("review-watched-repo", Some("bare-model"), &git_root);
+        assert_eq!(request["model"], "bare-model");
+        assert!(request.get("provider").is_none());
+    }
+
+    #[test]
+    fn a_profile_without_a_main_model_creates_without_model_flags() {
+        let (_dir, git_root) = watched_repo();
+        let request = conductor_create_request("review-watched-repo", None, &git_root);
+        assert!(request.get("model").is_none());
+        assert!(request.get("provider").is_none());
     }
 
     #[test]

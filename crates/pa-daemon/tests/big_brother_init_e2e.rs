@@ -298,15 +298,21 @@ fn init_enrolls_reviews_queries_and_survives_a_restart() {
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
     let url = spawn_review_mock();
-    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
-        .into_iter()
-        .map(|id| {
-            json!({
-                "id": id, "name": id, "api": "openai-completions",
-                "contextWindow": 128_000, "maxTokens": 4096
-            })
+    let models: Vec<Value> = [
+        "main",
+        "fallback",
+        "requirements",
+        "project-fit",
+        "implementation",
+    ]
+    .into_iter()
+    .map(|id| {
+        json!({
+            "id": id, "name": id, "api": "openai-completions",
+            "contextWindow": 128_000, "maxTokens": 4096
         })
-        .collect();
+    })
+    .collect();
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
@@ -318,6 +324,13 @@ fn init_enrolls_reviews_queries_and_survives_a_restart() {
         .to_string(),
     )
     .expect("models.json");
+    // A settings default that differs from the profile's mainModel: the
+    // conductor must ride the profile's model, never this default.
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "defaultProvider": "prime-inference", "defaultModel": "fallback" }).to_string(),
+    )
+    .expect("settings.json");
 
     let socket = dir.path().join("daemon.sock");
     let daemon = spawn_daemon(&socket, &agent_dir);
@@ -336,6 +349,36 @@ fn init_enrolls_reviews_queries_and_survives_a_restart() {
     assert!(outcome.created_conductor);
     assert!(outcome.profile_path.is_file());
     assert!(outcome.assets_dir.join("overview.md").is_file());
+
+    // The conductor session is created on the profile's mainModel (the
+    // create's explicit model flags), never the settings default — the
+    // beta.22 regression had every review turn run on the default model.
+    let model_changes: Vec<String> = std::fs::read_dir(agent_dir.join("sessions"))
+        .expect("sessions dir")
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter(|line| line.contains("model_change"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        model_changes.len(),
+        1,
+        "exactly the conductor's model_change exists at enrollment time"
+    );
+    assert!(
+        model_changes[0].contains("prime-inference") && model_changes[0].contains("main"),
+        "the conductor's model_change pins the profile mainModel: {}",
+        model_changes[0]
+    );
+    assert!(
+        !model_changes[0].contains("fallback"),
+        "the settings default never pins the conductor: {}",
+        model_changes[0]
+    );
 
     // The durable state records the git root and the seeded baseline.
     let store = RepositoryStateStore::open(&agent_dir, &repo);
