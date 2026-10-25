@@ -42,9 +42,9 @@ Choose Big Brother when you want background review of a repository you control, 
 
 ## Install the nightly release
 
-Nightly release archives contain `prime-agent`, `big-brother`, and `pa-daemon` for the same platform. `big-brother` manages enrollment and status, `pa-daemon supervisor` serves Prime Agent sessions, and `pa-daemon observer` runs the review watcher. The observer is a separate process; the service script below installs it.
+Nightly release archives contain `prime-agent`, `big-brother`, and `pa-daemon` for the same platform, plus the payload those binaries resolve at runtime: `prime-agent-runtime/` (the Python kernel review sessions boot), `package.json` (the version manifest `prime-agent --version` reports), catalog assets, and skills. `big-brother` manages enrollment and status, `pa-daemon supervisor` serves Prime Agent sessions, and `pa-daemon observer` runs the review watcher. The observer is a separate process; the service script below installs it.
 
-Download the archive for your platform from the [nightly release](https://github.com/clingto7/BigBrother/releases/tag/nightly). Check its SHA-256 against the matching row in `SHA256SUMS`, then extract all three executables into a directory on `PATH`:
+Download the archive for your platform from the [nightly release](https://github.com/clingto7/BigBrother/releases/tag/nightly). Check its SHA-256 against the matching row in `SHA256SUMS`, then extract the whole archive into a directory on `PATH`. Extract everything, not just the executables: without `prime-agent-runtime/` beside the binary every review fails with "The packaged prime-agent-runtime directory was not found", and without `package.json` the version reporting falls back to the build-time version:
 
 ```bash
 mkdir -p "$HOME/.local/bin" "$HOME/.cache/big-brother-release"
@@ -54,7 +54,7 @@ archive="prime-agent-VERSION-PLATFORM.tar.gz"
 expected="$(awk -v name="$archive" '$2 == name { print $1 }' SHA256SUMS)"
 actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
 test -n "$expected" && test "$actual" = "$expected"
-tar -xzf "$archive" -C "$HOME/.local/bin" prime-agent big-brother pa-daemon
+tar -xzf "$archive" -C "$HOME/.local/bin"
 ```
 
 Replace `VERSION` and `PLATFORM` with the archive name shown on the release page (for example `0.10.1-beta.21` and `darwin-arm64`). Add `~/.local/bin` to `PATH` if needed. On Windows, the executable names end in `.exe`.

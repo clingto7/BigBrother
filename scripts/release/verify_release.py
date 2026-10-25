@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -66,6 +67,26 @@ NATIVE_COMPAT_TOP_LEVEL = {"theme", "export-html", "photon_rs_bg.wasm", "PHOTON-
 
 # Same shape as `continuous_version` in assemble_artifacts.py.
 CONTINUOUS_SUFFIX = "continuous"
+
+
+def binary_executable_on_host(target: str) -> bool:
+    """Whether this process can execute the target's staged binary.
+
+    Gates the livecheck in multi-target contexts (the beta route verifies
+    every restamped target on one runner): a foreign-OS or foreign-arch
+    Linux binary cannot run. Darwin targets stay executable on every
+    Darwin host — the Apple-silicon pool executes the cross-built x86_64
+    leg under Rosetta 2, the delivery runtime for an Intel-Mac customer,
+    and that gate must keep firing. An unrecognized host (Windows runners)
+    keeps attempting the execution, the behavior before the gate existed.
+    """
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if "apple-darwin" in target:
+        return system == "darwin"
+    if "-windows-" in target:
+        return system.startswith("win")
+    return system == "linux" and machine == target.split("-", maxsplit=1)[0]
 
 
 def sha256_file(path: Path) -> str:
@@ -209,30 +230,33 @@ def main() -> int:
             path = scratch / companion["name"]
             if not path.is_file() or sha256_file(path) != companion["sha256"]:
                 fail(f"companion hash mismatch for {companion['name']}")
-        env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}
-        run = subprocess.run(
-            [str(binary), "--version"],
-            capture_output=True, text=True, env=env, cwd=scratch, check=False,
-        )
-        if run.returncode != 0:
-            fail(f"staged prime-agent --version failed: {run.stderr.strip()}")
-        version_out = run.stdout.strip()
-        expected_version = (
-            f"{args.version}-{CONTINUOUS_SUFFIX}.{args.sha}" if args.sha else args.version
-        )
-        if args.expect_package_json is not None:
-            expected_version = args.expect_package_json
-        if version_out != expected_version:
-            fail(
-                f"staged prime-agent reports {version_out!r}, "
-                f"expected {expected_version!r}"
+        livecheck_note = "livecheck skipped (not executable on this host)"
+        if binary_executable_on_host(args.target):
+            env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}
+            run = subprocess.run(
+                [str(binary), "--version"],
+                capture_output=True, text=True, env=env, cwd=scratch, check=False,
             )
+            if run.returncode != 0:
+                fail(f"staged prime-agent --version failed: {run.stderr.strip()}")
+            version_out = run.stdout.strip()
+            expected_version = (
+                f"{args.version}-{CONTINUOUS_SUFFIX}.{args.sha}" if args.sha else args.version
+            )
+            if args.expect_package_json is not None:
+                expected_version = args.expect_package_json
+            if version_out != expected_version:
+                fail(
+                    f"staged prime-agent reports {version_out!r}, "
+                    f"expected {expected_version!r}"
+                )
+            livecheck_note = "livecheck all OK"
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
     print(
         f"verified {archive_name}: payload, checksums, manifest, "
-        f"catalog assets ({json.dumps(catalog_facts)}), livecheck all OK"
+        f"catalog assets ({json.dumps(catalog_facts)}), {livecheck_note}"
     )
     return 0
 

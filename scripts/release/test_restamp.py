@@ -128,6 +128,12 @@ class ContinuousFixture:
                                    "--version", version, "--target", HOST_TARGET])
         if split.returncode:
             raise AssertionError(split.stderr)
+        # The companion tools (mandatory payload since the Big Brother
+        # release-archive fix): plain executable files the assembler
+        # stages and hashes beside the shipped binary.
+        self.companions = [root / "bin" / "big-brother", root / "bin" / "pa-daemon"]
+        for companion in self.companions:
+            shutil.copy2(self.raw, companion)
         self.catalog = root / "catalog-assets"
         bundled = run_cli(BUNDLER, ["generate", "--fixture", "--out", str(self.catalog)])
         if bundled.returncode:
@@ -139,6 +145,8 @@ class ContinuousFixture:
     def assemble_into(self, out_dir: Path, sha: str | None, target: str = HOST_TARGET):
         args = ["--repo-root", str(self.root), "--version", self.version,
                 "--target", target, "--binary", str(self.binary),
+                "--big-brother-binary", str(self.companions[0]),
+                "--daemon-binary", str(self.companions[1]),
                 "--runtime-dir", str(self.root / "runtime"),
                 "--out-dir", str(out_dir)]
         if target.endswith("-unknown-linux-gnu"):

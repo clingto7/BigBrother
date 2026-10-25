@@ -606,6 +606,22 @@ jobs:
             --version "${RELEASE_VERSION#v}" \
             --expect-commit "${{ steps.resolve.outputs.parent }}" \
             --out-dir restamped
+      - name: Verify the restamped set (every target, the consume-route shape)
+        # The restamp only livechecks the runner-host binary; the other
+        # targets' package.json restamp is verified here, per target, through
+        # the same gate the continuous runs apply pre-stamp. This is the
+        # beta channel's version floor: a restamp that fails to rewrite the
+        # runtime version manifest fails the release, not the field.
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            python3 scripts/release/verify_release.py \
+              --dist-dir "restamped/artifacts-${target}" \
+              --version "$version" \
+              --target "$target" \
+              --expect-package-json "$version"
+          done
       - name: Upload the restamped set as this run's build artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
