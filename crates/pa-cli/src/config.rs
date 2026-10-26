@@ -42,40 +42,13 @@ pub fn expand_tilde_path_os(value: &std::ffi::OsStr) -> PathBuf {
 
 pub const ENV_LEGACY_SESSION_DIR: &str = "PRIME_AGENT_CODING_AGENT_SESSION_DIR";
 
-/// The version compiled into this build, used when no packaged manifest
-/// overrides it.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The product version: the packaged `package.json` manifest next to the
-/// executable wins, falling back to the compiled-in version.
+/// The product version: the packaged `package.json` manifest beside the
+/// executable wins, falling back to the compile-time workspace version.
+/// The resolution lives in pa-core (`packages::shipped_version`) so every
+/// shipped binary reports identically on a restamped install.
 pub fn version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    VERSION.get_or_init(|| match packaged_manifest_version() {
-        Some(version) => version,
-        None => crate::config::VERSION.to_string(),
-    })
-}
-
-/// The packaged package-dir (`PI_PACKAGE_DIR` wins, else the directory of
-/// the executable, launcher symlinks resolved through pa-core's
-/// `exe_dir_of`).
-fn package_dir() -> PathBuf {
-    if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
-        if !env_dir.is_empty() {
-            return expand_tilde_path(&env_dir);
-        }
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| pa_core::packages::exe_dir_of(&exe))
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn packaged_manifest_version() -> Option<String> {
-    let manifest = std::fs::read_to_string(package_dir().join("package.json")).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&manifest).ok()?;
-    let version = parsed.get("version")?.as_str()?.trim();
-    (!version.is_empty()).then(|| version.to_string())
+    VERSION.get_or_init(pa_core::packages::shipped_version)
 }
 
 pub const ENV_OFFLINE: &str = "PI_OFFLINE";

@@ -57,6 +57,30 @@ pub(crate) fn package_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The packaged `package.json` version in `dir`, when one ships a usable
+/// version string.
+fn manifest_version_in(dir: &std::path::Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    let version = parsed.get("version")?.as_str()?.trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+/// The product version as shipped: the packaged `package.json` beside the
+/// executable wins (the release layout restamps it without rebuilding the
+/// binaries — the compiled-in version stays the continuous build's), with
+/// the compile-time workspace version as the fallback. Every binary that
+/// reports `--version` resolves through here, so a restamped install
+/// reports identically across the shipped executables.
+#[must_use]
+pub fn shipped_version() -> String {
+    static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| manifest_version_in(&package_dir()))
+        .clone()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// The directory beside the binary's real file: a launcher symlink (the
 /// Homebrew formula's `bin` link) must resolve, or the payload shipped
 /// beside the real binary is invisible; a plain path stays untouched.

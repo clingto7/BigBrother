@@ -22,6 +22,40 @@ async fn run() -> Result<()> {
         std::process::exit(2);
     });
     match command.as_str() {
+        "--help" | "-h" => {
+            println!("big-brother — Big Brother repository review enrollment and status");
+            println!();
+            println!("usage: big-brother <init|status> [options]");
+            println!();
+            println!("init options:");
+            println!("  --repo DIR                      The review work tree (default: the current directory)");
+            println!(
+                "  --agent-dir DIR                 The agent directory (default: ~/.prime/agent)"
+            );
+            println!("  --socket PATH                   The daemon's Unix socket");
+            println!("  --branch NAME                   The tracked branch (default: origin/HEAD, then main, master)");
+            println!("  --session-name NAME             The conductor's wake name (default: review-<repo>)");
+            println!("  --main-model PROVIDER/MODEL     The conductor's model");
+            println!("  --layer NAME=PROVIDER/MODEL     A review layer's model (repeatable)");
+            println!("  --attempt-timeout-secs N        One attempt's time budget (default: 1800)");
+            println!(
+                "  --max-attempts N                The attempt ceiling per range (default: 3)"
+            );
+            println!();
+            println!("status options:");
+            println!("  --repo DIR                      The review work tree (default: the current directory)");
+            println!(
+                "  --agent-dir DIR                 The agent directory (default: ~/.prime/agent)"
+            );
+            println!();
+            println!("  -h, --help                      Print this help");
+            println!("  -v, --version                   Print the version");
+            Ok(())
+        }
+        "--version" | "-v" => {
+            println!("{}", pa_core::packages::shipped_version());
+            Ok(())
+        }
         "init" => init_command(args).await,
         "status" => status_command(args),
         other => Err(anyhow!("unknown command: {other} (expected init|status)")),

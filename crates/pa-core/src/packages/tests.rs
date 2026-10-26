@@ -348,3 +348,34 @@ fn exe_dir_of_resolves_a_launcher_symlink() {
     assert_eq!(exe_dir_of(&launcher), Some(libexec.clone()));
     assert_eq!(exe_dir_of(&real), Some(libexec));
 }
+
+/// The shipped-version resolution reads the packaged manifest beside the
+/// binary: a usable `version` string wins, anything else falls back.
+#[test]
+fn manifest_version_in_reads_only_a_usable_version() {
+    use super::manifest_version_in;
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(
+        manifest_version_in(dir.path()).is_none(),
+        "no manifest ships no version"
+    );
+    std::fs::write(
+        dir.path().join("package.json"),
+        "{\"version\":\"9.9.9-beta.3\"}",
+    )
+    .unwrap();
+    assert_eq!(
+        manifest_version_in(dir.path()).as_deref(),
+        Some("9.9.9-beta.3")
+    );
+    std::fs::write(dir.path().join("package.json"), "{\"version\":\"  \"}").unwrap();
+    assert!(
+        manifest_version_in(dir.path()).is_none(),
+        "a blank version string is not a version"
+    );
+    std::fs::write(dir.path().join("package.json"), "not json").unwrap();
+    assert!(
+        manifest_version_in(dir.path()).is_none(),
+        "a malformed manifest falls back, never errors"
+    );
+}

@@ -12,10 +12,35 @@ async fn main() -> Result<()> {
     pa_types::memory_release::cap_thread_arenas();
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| {
-        eprintln!("usage: pa-daemon <supervisor|worker> [options]");
+        eprintln!("usage: pa-daemon <supervisor|worker|observer> [options]");
         std::process::exit(2);
     });
     match command.as_str() {
+        "--help" | "-h" => {
+            println!("pa-daemon — Prime Agent daemon supervisor");
+            println!();
+            println!("usage: pa-daemon <supervisor|worker|observer> [options]");
+            println!();
+            println!("commands:");
+            println!(
+                "  supervisor   Serve the daemon Unix socket, one supervised worker per session"
+            );
+            println!("  worker       Run one session worker (spawned by the supervisor)");
+            println!("  observer     Run the Big Brother review observer (the background watch)");
+            println!();
+            println!("options:");
+            println!("  --agent-dir DIR     The agent directory (default: ~/.prime/agent)");
+            println!("  --socket PATH       The supervisor's Unix socket (supervisor, observer)");
+            println!("  --interval-secs N   The observer's scan interval (default: 30)");
+            println!("  --once              Run exactly one observer scan and exit");
+            println!("  -h, --help          Print this help");
+            println!("  -v, --version       Print the version");
+            Ok(())
+        }
+        "--version" | "-v" => {
+            println!("{}", pa_core::packages::shipped_version());
+            Ok(())
+        }
         "supervisor" => {
             let mut socket_path = None;
             let mut agent_dir = None;
