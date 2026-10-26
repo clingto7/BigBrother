@@ -159,7 +159,7 @@ async fn observe_repo(
         let head = branch_head(&git_root, branch)?;
         match store.admit(branch, &head)? {
             Admission::Admitted(range) => {
-                eprintln!(
+                println!(
                     "big-brother observer: admitted {}..{head} on {branch}",
                     range.base
                 );
@@ -204,7 +204,7 @@ async fn try_complete_review(
         // retry; one it has means the turn is still spinning up. A
         // refused wake gives the quota back, so the next scan retries it.
         if woken.insert((profile.session_name.clone(), in_flight.head.clone())) {
-            eprintln!(
+            println!(
                 "big-brother observer: re-waking {} for a recovered in-flight range (attempt {})",
                 profile.session_name, in_flight.attempts
             );
@@ -226,7 +226,7 @@ async fn try_complete_review(
     // turn is still spinning up, and provider retries inside a turn
     // settle before the next interval-spaced scan re-reads the tail.
     if conductor_turn_dead(&transcript) {
-        eprintln!(
+        println!(
             "big-brother observer: attempt {} of {}..{} on {branch} died before dispatch",
             in_flight.attempts, in_flight.base, in_flight.head
         );
@@ -302,7 +302,7 @@ async fn try_complete_review(
     };
     store.complete(record)?;
     woken.remove(&(profile.session_name.clone(), in_flight.head.clone()));
-    eprintln!(
+    println!(
         "big-brother observer: completed review of {}..{} on {branch}",
         in_flight.base, in_flight.head
     );
@@ -338,7 +338,7 @@ async fn supervise_timeout(
     in_flight: &ReviewRange,
     woken: &mut BTreeSet<(String, String)>,
 ) -> Result<()> {
-    eprintln!(
+    println!(
         "big-brother observer: attempt {} of {}..{} on {branch} timed out",
         in_flight.attempts, in_flight.base, in_flight.head
     );
@@ -377,7 +377,7 @@ async fn supervise_failure(
         store
             .fail_range(branch, &in_flight.head, reason)
             .map_err(|error| anyhow!("failing the exhausted review range: {error}"))?;
-        eprintln!(
+        println!(
             "big-brother observer: range {}..{} on {branch} failed after {} attempt(s) ({reason}); the cursor holds and a later range re-covers it",
             in_flight.base, in_flight.head, in_flight.attempts
         );
@@ -387,7 +387,7 @@ async fn supervise_failure(
         .retry_attempt(branch, &in_flight.head)
         .map_err(|error| anyhow!("re-arming the review attempt: {error}"))?;
     woken.remove(&(profile.session_name.clone(), in_flight.head.clone()));
-    eprintln!(
+    println!(
         "big-brother observer: re-armed {}..{} on {branch} as attempt {}",
         in_flight.base,
         in_flight.head,
@@ -466,7 +466,7 @@ async fn cancel_attempt(
             .request(json!({ "type": "kill", "activeSessionId": id }))
             .await
         {
-            Ok(_) => eprintln!("big-brother observer: cancelled {name}"),
+            Ok(_) => println!("big-brother observer: cancelled {name}"),
             Err(error) => eprintln!("big-brother observer: cancelling {name}: {error:#}"),
         }
     }

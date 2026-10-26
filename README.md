@@ -162,7 +162,7 @@ On each interval, the observer:
 
 The default interval is 30 seconds. A dirty worktree, fetch failure, wrong checked-out branch, or non-fast-forward update is recorded and skipped without overwriting files. A repository with no fetch upstream remains usable in local-observation mode.
 
-The observer is a separate foreground process. `launchd` or `systemd --user` owns restart and logs; the Prime Agent daemon owns model sessions. Your interactive Prime Agent sessions continue using the same daemon independently.
+The observer is a separate foreground process. `launchd` or `systemd --user` owns restart and logs; the Prime Agent daemon owns model sessions. Your interactive Prime Agent sessions continue using the same daemon independently. The observer writes its event journal — admitted ranges, completed reviews, supervised failures — to stdout and diagnostics (scan errors, skipped branch updates) to stderr; the installed service captures them as `observer.log` and `observer.err.log`.
 
 ## Configuration and boundaries
 
