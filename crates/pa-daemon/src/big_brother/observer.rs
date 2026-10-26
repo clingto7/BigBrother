@@ -217,6 +217,31 @@ async fn try_complete_review(
         return Ok(false);
     };
     let conductor_id = session_id(conductor)?;
+    let transcript = client.get_messages(&conductor_id).await?;
+    // A turn that died before dispatching a single reviewer is a dead
+    // attempt (bad credentials, an unreachable provider): waiting the
+    // attempt budget would only delay the retry, so the failure is
+    // supervised at once — ADR 0028's ceiling still bounds the retries.
+    // Only a settled error row qualifies: a trailing wake row means a
+    // turn is still spinning up, and provider retries inside a turn
+    // settle before the next interval-spaced scan re-reads the tail.
+    if conductor_turn_dead(&transcript) {
+        eprintln!(
+            "big-brother observer: attempt {} of {}..{} on {branch} died before dispatch",
+            in_flight.attempts, in_flight.base, in_flight.head
+        );
+        supervise_failure(
+            client,
+            store,
+            profile,
+            branch,
+            in_flight,
+            woken,
+            "turn_failed",
+        )
+        .await?;
+        return Ok(false);
+    }
     // Every configured layer's child must exist and have answered.
     let mut answers: BTreeMap<String, String> = BTreeMap::new();
     let mut child_ids: BTreeMap<String, String> = BTreeMap::new();
@@ -238,9 +263,9 @@ async fn try_complete_review(
         answers.insert(layer.name.clone(), answer);
         child_ids.insert(layer.name.clone(), child_id);
     }
-    let transcript = client.get_messages(&conductor_id).await?;
+    let transcript_after_children = client.get_messages(&conductor_id).await?;
     // A harvest miss means the conversation has not settled yet.
-    let Ok(harvested) = harvest_review(&transcript, &answers) else {
+    let Ok(harvested) = harvest_review(&transcript_after_children, &answers) else {
         return Ok(false);
     };
     if harvested.base != in_flight.base || harvested.head != in_flight.head {
@@ -303,15 +328,8 @@ fn attempt_expired(profile: &ReviewProfile, range: &ReviewRange) -> bool {
     crate::util::now_ms().saturating_sub(started_ms) >= profile.attempt_timeout().as_millis() as u64
 }
 
-/// A timed-out attempt (ADR 0028): cancel it — the conductor first, then
-/// every layer child (a dead conductor reacts to no child notices) —
-/// then either re-arm the range as a fresh attempt, or fail the range
-/// loudly at the attempt ceiling. The re-arm does NOT wake inline: a
-/// wake issued in the kill's shadow races the cancelled worker's session
-/// lease (the cold-wake spawn would be refused with nothing retrying
-/// it), so the re-arm only advances the state and hands the attempt's
-/// wake quota back — the next scan's recovery path wakes the conductor
-/// with the retry instruction, outside the race window.
+/// A timed-out attempt (ADR 0028): the budget expired, so the failure is
+/// supervised — cancel, then re-arm or fail loudly at the ceiling.
 async fn supervise_timeout(
     client: &mut DaemonClient,
     store: &RepositoryStateStore,
@@ -324,13 +342,43 @@ async fn supervise_timeout(
         "big-brother observer: attempt {} of {}..{} on {branch} timed out",
         in_flight.attempts, in_flight.base, in_flight.head
     );
+    supervise_failure(
+        client,
+        store,
+        profile,
+        branch,
+        in_flight,
+        woken,
+        "timed_out",
+    )
+    .await
+}
+
+/// Supervise a failed attempt (ADR 0028): cancel it — the conductor
+/// first, then every layer child (a dead conductor reacts to no child
+/// notices) — then either re-arm the range as a fresh attempt, or fail
+/// the range loudly at the attempt ceiling. The re-arm does NOT wake
+/// inline: a wake issued in the kill's shadow races the cancelled
+/// worker's session lease (the cold-wake spawn would be refused with
+/// nothing retrying it), so the re-arm only advances the state and hands
+/// the attempt's wake quota back — the next scan's recovery path wakes
+/// the conductor with the retry instruction, outside the race window.
+async fn supervise_failure(
+    client: &mut DaemonClient,
+    store: &RepositoryStateStore,
+    profile: &ReviewProfile,
+    branch: &str,
+    in_flight: &ReviewRange,
+    woken: &mut BTreeSet<(String, String)>,
+    reason: &str,
+) -> Result<()> {
     cancel_attempt(client, profile, in_flight).await;
     if in_flight.attempts >= profile.max_attempts() {
         store
-            .fail_range(branch, &in_flight.head, "timed_out")
+            .fail_range(branch, &in_flight.head, reason)
             .map_err(|error| anyhow!("failing the exhausted review range: {error}"))?;
         eprintln!(
-            "big-brother observer: range {}..{} on {branch} failed after {} attempt(s); the cursor holds and a later range re-covers it",
+            "big-brother observer: range {}..{} on {branch} failed after {} attempt(s) ({reason}); the cursor holds and a later range re-covers it",
             in_flight.base, in_flight.head, in_flight.attempts
         );
         return Ok(());
@@ -346,6 +394,39 @@ async fn supervise_timeout(
         in_flight.attempts + 1
     );
     Ok(())
+}
+
+/// Whether the conductor's conversation shows a settled turn failure with
+/// no dispatch ever made: the wake's turn died before any reviewer ran
+/// (bad credentials, an unreachable provider). Only the transcript's LAST
+/// row qualifies — a trailing wake row means a turn is still spinning up,
+/// and any dispatch call in the history means the attempt got somewhere
+/// and stays under its budget instead.
+fn conductor_turn_dead(transcript: &Value) -> bool {
+    let Some(rows) = transcript
+        .get("messages")
+        .and_then(Value::as_array)
+        .or_else(|| transcript.as_array())
+    else {
+        return false;
+    };
+    let dispatched = rows.iter().any(|row| {
+        row.get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("toolCall")
+                        && block.get("name").and_then(Value::as_str) == Some("dispatch_review")
+                })
+            })
+    });
+    if dispatched {
+        return false;
+    }
+    rows.last().is_some_and(|row| {
+        row.get("role").and_then(Value::as_str) == Some("assistant")
+            && row.get("stopReason").and_then(Value::as_str) == Some("error")
+    })
 }
 
 /// Cancel one attempt (ADR 0028): kill the conductor first, then every

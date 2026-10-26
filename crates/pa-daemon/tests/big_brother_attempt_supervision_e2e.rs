@@ -259,6 +259,48 @@ fn spawn_review_mock() -> (PathBuf, Arc<AtomicUsize>) {
     (PathBuf::from(url), calls)
 }
 
+/// A provider that refuses every request with a 500: the conductor's
+/// wake turn dies before dispatching a single reviewer (the dead
+/// credentials / unreachable provider class).
+fn serve_dead_review(mut stream: TcpStream) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = value.trim().parse().unwrap_or_default();
+        }
+    }
+    let mut body = vec![0; content_length];
+    reader.read_exact(&mut body)?;
+    stream.write_all(
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"dead provider\"}}",
+    )
+}
+
+fn spawn_dead_review_mock() -> PathBuf {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind dead mock");
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let _ = serve_dead_review(stream);
+            });
+        }
+    });
+    PathBuf::from(url)
+}
+
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
@@ -356,6 +398,24 @@ struct Fixture {
 }
 
 fn fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
+    let url = spawn_review_mock().0;
+    fixture_with(repo_dir_name, max_attempts, &url, ATTEMPT_TIMEOUT_SECONDS)
+}
+
+/// A dead-provider fixture whose attempt budget is unreachable inside any
+/// test deadline: settling at all proves the failure was supervised
+/// through the dead-turn fast lane, never the timeout.
+fn dead_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
+    let url = spawn_dead_review_mock();
+    fixture_with(repo_dir_name, max_attempts, &url, 1800)
+}
+
+fn fixture_with(
+    repo_dir_name: &str,
+    max_attempts: u32,
+    url: &Path,
+    attempt_timeout_seconds: u32,
+) -> Fixture {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let repo = dir.path().join(repo_dir_name);
     std::fs::create_dir(&repo).expect("repo");
@@ -366,7 +426,6 @@ fn fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
 
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
-    let (url, _project_fit_calls) = spawn_review_mock();
     let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
         .into_iter()
         .map(|id| {
@@ -418,7 +477,7 @@ fn fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
                     "prime-inference/implementation".to_string(),
                 ),
             ],
-            attempt_timeout_seconds: Some(ATTEMPT_TIMEOUT_SECONDS),
+            attempt_timeout_seconds: Some(attempt_timeout_seconds),
             max_attempts: Some(max_attempts),
         }))
         .expect("init");
@@ -594,4 +653,43 @@ fn an_exhausted_range_fails_loudly_and_a_later_range_recovers() {
     assert_eq!(records[0].head, recovered);
     // The failure fact stays visible beside the recovery.
     assert!(branch_state.last_failure.is_some());
+}
+
+#[test]
+fn an_attempt_that_dies_before_dispatch_fails_within_scans_not_the_budget() {
+    // The dead-credential class (the beta.22 first session): the wake
+    // turn errors out before dispatching a single reviewer. The attempt
+    // budget here is 1800s — far beyond the deadline — so settling at all
+    // proves the observer supervised the dead turn at scan pace instead
+    // of holding the range hostage to the budget, and the failure is
+    // visible with its reason.
+    let fixture = dead_fixture("repo-dead", 2);
+    let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let base = fixture.store.load().expect("state").branches[&branch]
+        .cursor
+        .clone()
+        .expect("seeded baseline");
+    let head = commit_change(&fixture.repo, "broken\n", "break");
+
+    observe_until_settled(&fixture, Duration::from_secs(180));
+
+    let state = fixture.store.load().expect("state");
+    let branch_state = state.branches[&branch].clone();
+    assert!(branch_state.in_flight.is_none());
+    assert_eq!(branch_state.cursor.as_deref(), Some(base.as_str()));
+    assert!(fixture.store.records(&branch).expect("records").is_empty());
+    let failure = branch_state.last_failure.expect("loud failure");
+    assert_eq!(failure.base, base);
+    assert_eq!(failure.head, head);
+    assert_eq!(failure.attempts, 2);
+    assert_eq!(failure.reason, "turn_failed");
+    let text = render_status(
+        &load_repository_status(&QueryOptions {
+            agent_dir: fixture.agent_dir.clone(),
+            repo: fixture.repo.clone(),
+        })
+        .expect("status"),
+    );
+    assert!(text.contains("last review failed"), "{text}");
+    assert!(text.contains("(turn_failed)"), "{text}");
 }
