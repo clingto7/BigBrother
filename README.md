@@ -96,6 +96,22 @@ big-brother init \
   --layer implementation=provider/model
 ```
 
+`big-brother init` accepts:
+
+| Option | Meaning |
+| --- | --- |
+| `--repo DIR` | The review work tree (default: the current directory) |
+| `--agent-dir DIR` | The agent directory (default: `~/.prime/agent`) |
+| `--socket PATH` | The daemon's Unix socket (default: the standard daemon socket) |
+| `--branch NAME` | The tracked branch (default: `origin/HEAD`, then `main`, then `master`) |
+| `--session-name NAME` | The conductor's wake name (default: `review-<repo>`; pass one when the default collides with an existing session) |
+| `--main-model provider/model` | The conductor session's model |
+| `--layer name=provider/model` | A review layer's model (repeatable) |
+| `--attempt-timeout-secs N` | One attempt's time budget (default: 1800) |
+| `--max-attempts N` | The attempt ceiling per range (default: 3; at the ceiling the range fails loudly and the cursor holds) |
+
+`big-brother status` accepts `--repo` and `--agent-dir` with the same meanings. Both commands print their full flag surface with `--help`, and `--version` reports the shipped version.
+
 The existing Prime Agent daemon must be running before `init`. If you manage it manually, use the same agent directory and socket for both processes:
 
 ```bash
@@ -109,6 +125,17 @@ scripts/big-brother-service.sh install \
   --agent-dir "$HOME/.prime/agent" \
   --binary "$(command -v pa-daemon)"
 ```
+
+The script also accepts `--interval-secs N` (the scan interval, default 30) and `--socket PATH`. Pass `--socket` when the supervisor does not serve the standard socket — for example on a machine that also runs the TS Prime Agent daemon on the default path, where the Rust supervisor must listen elsewhere and every client (init, observer, the installed service) must agree on the same explicit path:
+
+```bash
+scripts/big-brother-service.sh install \
+  --agent-dir "$HOME/.prime/agent" \
+  --socket "/tmp/big-brother-daemon.sock" \
+  --binary "$(command -v pa-daemon)"
+```
+
+`PA_DAEMON_BIN` is the `--binary` fallback when `pa-daemon` is not on `PATH`.
 
 Inspect enrollment and review progress:
 
