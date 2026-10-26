@@ -29,7 +29,7 @@ impl DaemonClient {
         let stream = tokio::time::timeout(REQUEST_TIMEOUT, connect_transport(socket_path))
             .await
             .context("timed out connecting to the daemon")?
-            .with_context(|| format!("connecting to daemon socket {}", socket_path.display()))?;
+            .map_err(|error| connection_error_context(socket_path, error))?;
         let (read_half, write_half) = stream.split();
         let mut client = DaemonClient {
             reader: BufReader::new(read_half),
@@ -109,4 +109,62 @@ pub(crate) fn session_id(row: &Value) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("roster row carries no session id: {row}"))
+}
+
+/// The connect failure's context: a refused connection against an
+/// existing socket file is the signature of a dead supervisor's leftover
+/// (the next supervisor start cleans it up) — a bare "Connection refused"
+/// never says which of "wrong path" and "dead daemon" the operator is
+/// looking at.
+fn connection_error_context(socket_path: &Path, error: anyhow::Error) -> anyhow::Error {
+    let mut context = format!("connecting to daemon socket {}", socket_path.display());
+    if error.to_string().to_ascii_lowercase().contains("refused")
+        && std::fs::symlink_metadata(socket_path).is_ok()
+    {
+        context.push_str(
+            " — the socket file exists but nothing is listening; it may be left over from a \
+             dead supervisor (the next supervisor start cleans it up); is the supervisor running?",
+        );
+    }
+    error.context(context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refused connect against a leftover socket file (a bound listener
+    /// dropped without unlinking) names the stale file, so an operator can
+    /// tell a dead daemon's leftover from a wrong path.
+    #[tokio::test]
+    async fn a_refused_connect_against_a_stale_socket_file_names_the_leftover() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("stale.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        drop(listener); // the file outlives the listener: the stale shape
+        let error = match DaemonClient::connect(&socket).await {
+            Ok(_) => panic!("a stale socket file must refuse the connect"),
+            Err(error) => error,
+        };
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("left over from a dead supervisor"),
+            "the stale file is named:\n{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_socket_never_claims_a_leftover() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("absent.sock");
+        let error = match DaemonClient::connect(&socket).await {
+            Ok(_) => panic!("an absent socket path must fail the connect"),
+            Err(error) => error,
+        };
+        let rendered = format!("{error:#}");
+        assert!(
+            !rendered.contains("left over"),
+            "an absent path is not a leftover:\n{rendered}"
+        );
+    }
 }
