@@ -48,28 +48,45 @@ impl AgentSessionEngine {
                 self.config.agent_dir.join("models.json"),
             );
             registry.load_private_authorization_from_cache();
-            if !registry.has_configured_auth(&preflight_model) {
-                let uses_oauth = registry
-                    .auth
-                    .get_all()
-                    .credential(&preflight_model.provider)
-                    .is_some_and(|credential| {
-                        matches!(credential, pa_core::auth::AuthCredential::Oauth { .. })
-                    });
-                let message = if uses_oauth {
+            let uses_oauth = registry
+                .auth
+                .get_all()
+                .credential(&preflight_model.provider)
+                .is_some_and(|credential| {
+                    matches!(credential, pa_core::auth::AuthCredential::Oauth { .. })
+                });
+            // An OAuth credential that still resolves a usable request
+            // key is healthy; one that resolves none (expired with a
+            // failed refresh, and no env or provider-config fallback) is
+            // the same credentials failure the no-auth arm reports — the
+            // provider request would otherwise mislabel it "No API key
+            // for provider".
+            let oauth_key_unavailable = uses_oauth
+                && registry
+                    .get_api_key_and_headers(&preflight_model, None)
+                    .api_key
+                    .is_none();
+            let message = if !registry.has_configured_auth(&preflight_model)
+                || oauth_key_unavailable
+            {
+                Some(if uses_oauth {
                     format!(
-                        "Authentication failed for \"{}\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials.",
-                        preflight_model.provider
-                    )
+                            "Authentication failed for \"{}\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials.",
+                            preflight_model.provider
+                        )
                 } else {
                     let docs = pa_core::packages::docs_path();
                     format!(
-                        "No API key found for {}.\n\nUse /login to log into a provider via OAuth or API key. See:\n  {}\n  {}",
-                        preflight_model.provider,
-                        docs.join("providers.md").display(),
-                        docs.join("models.md").display()
-                    )
-                };
+                            "No API key found for {}.\n\nUse /login to log into a provider via OAuth or API key. See:\n  {}\n  {}",
+                            preflight_model.provider,
+                            docs.join("providers.md").display(),
+                            docs.join("models.md").display()
+                        )
+                })
+            } else {
+                None
+            };
+            if let Some(message) = message {
                 return TurnResult::Error {
                     error: message,
                     assistant: None,

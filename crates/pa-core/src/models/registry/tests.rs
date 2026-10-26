@@ -411,3 +411,38 @@ fn without_a_stored_xai_subscription_the_models_stay_on_completions() {
     assert!(grok.thinking_level_map.is_none());
     assert!(grok.compat.is_none());
 }
+
+/// The run-start preflight's OAuth arm (pa-daemon turn/model.rs) reads
+/// this composite: a stored OAuth credential whose token expired and
+/// whose refresh cannot produce a new one (`NoOAuth` here; the real
+/// integrations' failed refresh is pinned in `provider_oauth`'s battery)
+/// leaves the request auth with NO key and no fallback — the state the
+/// provider request mislabels "No API key for provider" and the preflight
+/// must classify as a credentials failure instead.
+#[test]
+fn an_expired_unrefreshable_oauth_credential_resolves_no_request_key() {
+    let auth = auth_without_env(&serde_json::json!({
+        "battery": { "type": "oauth", "access": "stale", "refresh": "nope", "expires": 1 }
+    }));
+    let mut registry = ModelRegistry::in_memory(auth);
+    let expired = model("mock-1", "battery");
+    assert!(
+        registry.has_configured_auth(&expired),
+        "the stored credential counts as configured auth"
+    );
+    let resolved = registry.get_api_key_and_headers(&expired, None);
+    assert!(resolved.ok);
+    assert!(
+        resolved.api_key.is_none(),
+        "the expired, unrefreshable token yields no usable request key"
+    );
+    // The healthy contrast: an unexpired token resolves its access token.
+    let healthy = auth_without_env(&serde_json::json!({
+        "cell": { "type": "oauth", "access": "live-token", "refresh": "nope",
+                  "expires": 4_102_444_800_000i64 }
+    }));
+    let mut registry = ModelRegistry::in_memory(healthy);
+    let live = model("mock-1", "cell");
+    let resolved = registry.get_api_key_and_headers(&live, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("live-token"));
+}
