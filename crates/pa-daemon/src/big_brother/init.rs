@@ -124,16 +124,33 @@ pub async fn run_init(options: InitOptions) -> Result<InitOutcome> {
         .map_err(|error| anyhow!("seeding the review cursor: {error}"))?;
 
     // Conductor: created through the daemon protocol carrying the review
-    // marker (ADR 0024); a roster hit by wake name means an earlier
-    // enrollment already created it, and init never creates a second one.
-    // The profile's mainModel rides the create's explicit model flags —
-    // without them the conductor falls to the settings default and every
-    // review turn runs on an operator-unintended model.
-    let sessions = client.list_sessions().await?;
-    let created_conductor = !sessions.iter().any(|row| {
+    // marker (ADR 0024). The presence check reads the SAME facts the
+    // observer's wake resolves — the resident roster plus the saved
+    // sessions on disk (`list all`) — so a conductor whose session file
+    // was deleted and whose worker left with a daemon restart is
+    // recreated, never reported present while unwakeable. A same-name
+    // session bound to a different directory is a collision, not our
+    // conductor: wake-by-name (ADR 0023) would deliver reviews to the
+    // wrong conversation, so enrollment refuses it.
+    let sessions = client.list_sessions_including_saved().await?;
+    let existing_conductor = sessions.iter().find(|row| {
         row.get("sessionName").and_then(|value| value.as_str())
             == Some(profile.session_name.as_str())
     });
+    let created_conductor = match existing_conductor {
+        Some(row) => {
+            let cwd = row.get("cwd").and_then(Value::as_str).unwrap_or_default();
+            anyhow::ensure!(
+                Path::new(cwd) == git_root,
+                "a session named \"{}\" already exists for a different directory ({cwd}); the \
+                 observer wakes the conductor by name, so its reviews would reach that session. \
+                 Enroll with --session-name, or remove the colliding session.",
+                profile.session_name
+            );
+            false
+        }
+        None => true,
+    };
     if created_conductor {
         client
             .request(conductor_create_request(

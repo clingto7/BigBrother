@@ -92,6 +92,17 @@ impl DaemonClient {
             .unwrap_or_default())
     }
 
+    /// The full roster — resident workers plus saved sessions on disk (the
+    /// same facts the saved-session wake resolves): presence checks that
+    /// must agree with wake-by-name read this, not the resident-only view.
+    pub(crate) async fn list_sessions_including_saved(&mut self) -> Result<Vec<Value>> {
+        let response = self.request(json!({ "type": "list", "all": true })).await?;
+        Ok(response["data"]["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
     /// One session's transcript (the harvest input, ADR 0026).
     pub(crate) async fn get_messages(&mut self, active_session_id: &str) -> Result<Value> {
         self.request(json!({

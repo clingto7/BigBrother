@@ -185,6 +185,14 @@ fn spawn_review_mock() -> PathBuf {
 
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
+    spawn_daemon_with_lost_exit(socket, agent_dir, 15_000)
+}
+
+/// The supervisor spawn with the worker's lost-supervisor exit configured:
+/// tests that need the workers to actually leave when the supervisor dies
+/// pass a short window instead of the default 15s.
+#[allow(clippy::zombie_processes)]
+fn spawn_daemon_with_lost_exit(socket: &Path, agent_dir: &Path, lost_exit_ms: u64) -> Daemon {
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
         .arg("supervisor")
         .arg("--socket")
@@ -200,7 +208,7 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .stderr(Stdio::null())
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
-            "15000",
+            lost_exit_ms.to_string(),
         )
         .spawn()
         .expect("spawn pa-daemon supervisor");
@@ -456,4 +464,139 @@ fn init_enrolls_reviews_queries_and_survives_a_restart() {
     assert!(branch_state.in_flight.is_none());
     assert_eq!(store.records(&branch).expect("records").len(), 1);
     drop(restarted);
+}
+
+/// The conductor-presence contract (ADR 0023's wake-by-name alignment):
+/// a conductor whose session file was deleted and whose worker left with
+/// a daemon restart is recreated by re-enrollment — never reported
+/// present while unwakeable — and a same-name session bound to a
+/// different directory refuses enrollment instead of silently receiving
+/// the wrong repository's reviews.
+#[test]
+fn a_deleted_conductor_is_recreated_and_a_colliding_name_is_refused() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("code.txt"), "baseline\n").expect("baseline file");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "baseline"]);
+
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
+    let url = spawn_review_mock();
+    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
+        .into_iter()
+        .map(|id| {
+            json!({
+                "id": id, "name": id, "api": "openai-completions",
+                "contextWindow": 128_000, "maxTokens": 4096
+            })
+        })
+        .collect();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": { "prime-inference": {
+                "api": "openai-completions", "baseUrl": url.to_string_lossy(),
+                "apiKey": "sk-review-test", "models": models
+            }}
+        })
+        .to_string(),
+    )
+    .expect("models.json");
+
+    let socket = dir.path().join("daemon.sock");
+    let daemon = spawn_daemon_with_lost_exit(&socket, &agent_dir, 0);
+    let first = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run_init(init_options(&socket, &agent_dir, &repo)))
+        .expect("first init");
+    assert!(first.created_conductor);
+
+    // Capture the worker socket from its durable descriptor so the test
+    // can wait for the orphan worker's actual exit, not just the
+    // supervisor's exit.
+    let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
+    let worker_logs: Vec<PathBuf> = std::fs::read_dir(&descriptor_dir)
+        .expect("worker descriptor dir")
+        .flatten()
+        .filter_map(|entry| {
+            let descriptor: Value =
+                serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
+            descriptor
+                .get("workerId")
+                .and_then(Value::as_str)
+                .map(|worker_id| {
+                    pa_daemon::paths::logs_dir(&agent_dir)
+                        .join(format!("worker-{worker_id}.stderr.log"))
+                })
+        })
+        .collect();
+    assert!(!worker_logs.is_empty(), "init created a worker descriptor");
+
+    // The reported regression: the conductor's session file is deleted
+    // after its orphan worker exits, and re-enrollment must recreate the
+    // conductor instead of reporting it present.
+    drop(daemon);
+    std::fs::remove_file(&socket).ok();
+    wait_until(Duration::from_secs(10), || {
+        worker_logs
+            .iter()
+            .all(|worker_log| {
+                std::fs::read_to_string(worker_log)
+                    .is_ok_and(|log| log.contains("exiting orphaned worker"))
+            })
+            .then_some(())
+    });
+    for entry in std::fs::read_dir(agent_dir.join("sessions"))
+        .expect("sessions dir")
+        .flatten()
+    {
+        std::fs::remove_file(entry.path()).expect("delete the conductor session file");
+    }
+    let restarted = spawn_daemon(&socket, &agent_dir);
+    let second = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run_init(init_options(&socket, &agent_dir, &repo)))
+        .expect("re-init after the deletion");
+    assert!(
+        second.created_conductor,
+        "a conductor missing from the roster and the disk is recreated"
+    );
+    drop(restarted);
+    std::fs::remove_file(&socket).ok();
+
+    // A different repository whose directory shares the basename resolves
+    // the same default wake name: enrollment must refuse the collision —
+    // wake-by-name would deliver this repository's reviews to the other
+    // repository's conductor.
+    let other_dir = tempfile::TempDir::new().expect("second temp dir");
+    let other_repo = other_dir.path().join("repo");
+    std::fs::create_dir(&other_repo).expect("other repo");
+    git(&other_repo, &["init", "-q"]);
+    std::fs::write(other_repo.join("code.txt"), "baseline\n").expect("baseline file");
+    git(&other_repo, &["add", "code.txt"]);
+    git(&other_repo, &["commit", "-qm", "baseline"]);
+    let daemon = spawn_daemon(&socket, &agent_dir);
+    let collision = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(run_init(init_options(&socket, &agent_dir, &other_repo)))
+        .expect_err("the colliding wake name is refused");
+    let rendered = format!("{collision:#}");
+    assert!(
+        rendered.contains("--session-name"),
+        "the refusal points at the escape hatch:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("already exists for a different directory"),
+        "the refusal names the collision:\n{rendered}"
+    );
+    drop(daemon);
 }
