@@ -8,7 +8,7 @@
 //! Pure over its inputs, so the observer (and tests) can rebuild a
 //! Review record from any settled review conversation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -32,12 +32,21 @@ pub struct HarvestedReview {
     pub base: String,
     pub head: String,
     pub layers: Vec<HarvestedLayer>,
+    /// Dispatched layers with neither a delivered answer nor a readable
+    /// child transcript. A synthesis can exist despite a child exiting
+    /// without a reply; the observer supervises that attempt instead of
+    /// treating it as a complete Review record.
+    pub missing_layers: Vec<String>,
+    /// Missing layers whose exact `<layer>-<head>` child has a terminal
+    /// no-reply notice in the conductor transcript.
+    pub no_reply_layers: Vec<String>,
     pub conclusion: String,
 }
 
-/// Inputs that cannot yield a complete review: loud, because a record
-/// assembled from a partial conversation would report an unfinished
-/// assessment as reviewed.
+/// Transcript shapes that cannot yield a synthesis or identify a review
+/// range are loud. Missing layer answers are returned on
+/// [`HarvestedReview`] so the observer can wait for persistence or
+/// supervise a confirmed no-reply exit.
 #[derive(Debug, thiserror::Error)]
 pub enum HarvestError {
     /// The payload is not a messages document at all.
@@ -61,12 +70,6 @@ pub enum HarvestError {
         call_id: String,
         /// What is missing or wrong.
         reason: String,
-    },
-    /// A dispatched layer's answer was never collected.
-    #[error("layer \"{layer}\" was dispatched but its answer was never collected")]
-    MissingAnswer {
-        /// The layer that stayed unanswered.
-        layer: String,
     },
     /// The conductor never wrote a synthesis.
     #[error("the transcript has no synthesis text after the dispatch results")]
@@ -107,6 +110,7 @@ pub fn harvest_review(
     // layer and exact head wins, and a reply for an earlier range never
     // satisfies a later one.
     let mut delivered: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut no_reply_children = BTreeSet::new();
     // The synthesis is the last conductor text AFTER the conversation's
     // final activity row (a tool result or a child-reply custom row):
     // intermediate "awaiting reviewers" texts and the wake message never
@@ -123,6 +127,9 @@ pub fn harvest_review(
         }
         if row.get("role").and_then(Value::as_str) == Some("custom") {
             last_activity_index = Some(index);
+            if let Some(child) = no_reply_child(row) {
+                no_reply_children.insert(child);
+            }
             if let Some((layer, head, body)) = child_reply(row) {
                 delivered.insert((layer, head), body);
             }
@@ -186,6 +193,8 @@ pub fn harvest_review(
         }
     }
     let mut layers = Vec::with_capacity(calls.len());
+    let mut missing_layers = Vec::new();
+    let mut no_reply_layers = Vec::new();
     for call in calls {
         // The delivered body wins (ADR 0030); a layer with no delivered
         // reply keeps the collected child transcript answer (ADR 0026) —
@@ -195,7 +204,11 @@ pub fn harvest_review(
             .cloned()
             .or_else(|| child_answers.get(&call.layer).cloned());
         let Some(answer) = answer else {
-            return Err(HarvestError::MissingAnswer { layer: call.layer });
+            if no_reply_children.contains(&format!("{}-{head}", call.layer)) {
+                no_reply_layers.push(call.layer.clone());
+            }
+            missing_layers.push(call.layer);
+            continue;
         };
         layers.push(HarvestedLayer {
             layer: call.layer,
@@ -209,8 +222,17 @@ pub fn harvest_review(
         base,
         head,
         layers,
+        missing_layers,
+        no_reply_layers,
         conclusion,
     })
+}
+
+/// The layer child named by a terminal no-reply custom row, if present.
+fn no_reply_child(row: &Value) -> Option<String> {
+    let content = row.get("content").and_then(Value::as_str)?;
+    let child = content.strip_prefix("[child-exited: no-reply child:")?;
+    Some(child.split_once(']')?.0.to_string())
 }
 
 /// The last assistant text of a `get_messages` payload (`{"messages":
@@ -388,6 +410,7 @@ mod tests {
         // The LAST text after the results is the synthesis — the mid-flow
         // "awaiting reviewers" row never wins.
         assert_eq!(harvested.conclusion, "clean overall");
+        assert!(harvested.missing_layers.is_empty());
         assert_eq!(
             harvested.layers,
             vec![
@@ -416,14 +439,33 @@ mod tests {
     }
 
     #[test]
-    fn an_uncollected_layer_is_loud() {
+    fn an_uncollected_layer_is_reported_for_attempt_supervision() {
         let mut answers = complete_answers();
         answers.remove("project-fit");
-        let error = harvest_review(&complete_transcript(), &answers).unwrap_err();
-        assert!(
-            error.to_string().contains("answer was never collected"),
-            "{error}"
+        let harvested = harvest_review(&complete_transcript(), &answers).unwrap();
+        assert_eq!(harvested.missing_layers, vec!["project-fit"]);
+        assert!(harvested.no_reply_layers.is_empty());
+        assert_eq!(harvested.conclusion, "clean overall");
+    }
+
+    #[test]
+    fn an_exact_child_no_reply_notice_marks_only_its_missing_layer_terminal() {
+        let mut transcript = complete_transcript();
+        let rows = transcript["messages"].as_array_mut().unwrap();
+        rows.insert(
+            rows.len() - 1,
+            json!({
+                "role": "custom",
+                "content": format!("[child-exited: no-reply child:project-fit-{HEAD}]")
+            }),
         );
+        let mut answers = complete_answers();
+        answers.remove("project-fit");
+
+        let harvested = harvest_review(&transcript, &answers).unwrap();
+
+        assert_eq!(harvested.missing_layers, vec!["project-fit"]);
+        assert_eq!(harvested.no_reply_layers, vec!["project-fit"]);
     }
 
     #[test]
@@ -501,6 +543,37 @@ mod tests {
                 "clean requirements report",
                 "clean project-fit report",
                 "clean implementation report",
+            ]
+        );
+    }
+
+    #[test]
+    fn delivered_bodies_complete_harvest_without_resident_children() {
+        let mut transcript = complete_transcript();
+        let rows = transcript["messages"].as_array_mut().unwrap();
+        for layer in ["requirements", "project-fit", "implementation"] {
+            rows.insert(
+                rows.len() - 1,
+                reply_row(
+                    &format!("{layer}-{HEAD}"),
+                    &format!("delivered {layer} report"),
+                ),
+            );
+        }
+
+        let harvested = harvest_review(&transcript, &BTreeMap::new()).unwrap();
+
+        assert!(harvested.missing_layers.is_empty());
+        assert_eq!(
+            harvested
+                .layers
+                .iter()
+                .map(|layer| layer.answer.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "delivered requirements report",
+                "delivered project-fit report",
+                "delivered implementation report",
             ]
         );
     }

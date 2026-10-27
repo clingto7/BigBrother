@@ -54,6 +54,12 @@ struct Daemon {
     socket: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum ReviewMockBehavior {
+    StallThenReply,
+    RuntimeMissingThenReply,
+}
+
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -77,10 +83,14 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
 /// (model `main`) dispatches while the history carries fewer full
 /// dispatch rounds for the CURRENT range than the wake history requires
 /// (one per `REVIEW_RANGE` plus one per `Retry attempt` note); the
-/// `project-fit` child stalls — by hanging the connection — on its first
-/// call per mock and answers from the second on; every other layer model
-/// answers once.
-fn serve_review(mut stream: TcpStream, project_fit_calls: &AtomicUsize) -> std::io::Result<()> {
+/// `project-fit` either stalls by hanging the connection or emits the
+/// packaged-runtime failure on its first call, then answers on retry;
+/// every other layer model answers once.
+fn serve_review(
+    mut stream: TcpStream,
+    project_fit_calls: &AtomicUsize,
+    behavior: ReviewMockBehavior,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut content_length = 0usize;
     loop {
@@ -198,17 +208,26 @@ fn serve_review(mut stream: TcpStream, project_fit_calls: &AtomicUsize) -> std::
             ],
         }
     } else if model == "project-fit" {
-        // The stall (ADR 0028's reason to exist): the first call per mock
-        // accepts the request and never answers — the reviewer's turn
-        // waits on a model call that never returns, so
-        // `last_assistant_text` stays `None` and the attempt can only
-        // expire. (An empty answer does NOT stall: the worker retries the
-        // provider and the retry answers.)
+        // The stall (ADR 0028's reason to exist) accepts the first
+        // request and never answers. The runtime-failure script emits its
+        // error text once to verify it cannot be recorded as a successful
+        // review and is retried.
         let calls = project_fit_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if calls >= 2 {
             vec![
                 chunk(
                     &json!({"role": "assistant", "content": "project-fit reviewed"}),
+                    None,
+                ),
+                chunk(&json!({}), Some("stop")),
+            ]
+        } else if matches!(behavior, ReviewMockBehavior::RuntimeMissingThenReply) {
+            vec![
+                chunk(
+                    &json!({
+                        "role": "assistant",
+                        "content": "The packaged prime-agent-runtime directory was not found"
+                    }),
                     None,
                 ),
                 chunk(&json!({}), Some("stop")),
@@ -239,7 +258,7 @@ fn serve_review(mut stream: TcpStream, project_fit_calls: &AtomicUsize) -> std::
     )
 }
 
-fn spawn_review_mock() -> (PathBuf, Arc<AtomicUsize>) {
+fn spawn_review_mock(behavior: ReviewMockBehavior) -> (PathBuf, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
         "http://127.0.0.1:{}/v1",
@@ -252,7 +271,7 @@ fn spawn_review_mock() -> (PathBuf, Arc<AtomicUsize>) {
             let Ok(stream) = stream else { continue };
             let calls = Arc::clone(&project_fit_calls);
             std::thread::spawn(move || {
-                let _ = serve_review(stream, &calls);
+                let _ = serve_review(stream, &calls, behavior);
             });
         }
     });
@@ -398,7 +417,12 @@ struct Fixture {
 }
 
 fn fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
-    let url = spawn_review_mock().0;
+    let url = spawn_review_mock(ReviewMockBehavior::StallThenReply).0;
+    fixture_with(repo_dir_name, max_attempts, &url, ATTEMPT_TIMEOUT_SECONDS)
+}
+
+fn runtime_failure_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
+    let url = spawn_review_mock(ReviewMockBehavior::RuntimeMissingThenReply).0;
     fixture_with(repo_dir_name, max_attempts, &url, ATTEMPT_TIMEOUT_SECONDS)
 }
 
@@ -600,6 +624,29 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
     })
     .expect("status");
     assert!(status.branches[0].last_failure.is_none());
+}
+
+#[test]
+fn a_missing_packaged_runtime_fails_the_attempt_and_the_retry_completes() {
+    let fixture = runtime_failure_fixture("repo-runtime-retry", 2);
+    let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let head = commit_change(&fixture.repo, "changed\n", "change");
+
+    observe_until_settled(&fixture, Duration::from_secs(180));
+
+    let state = fixture.store.load().expect("state");
+    let branch_state = &state.branches[&branch];
+    assert!(branch_state.in_flight.is_none());
+    assert_eq!(
+        branch_state.cursor.as_deref(),
+        Some(head.as_str()),
+        "branch state after runtime recovery: {branch_state:#?}"
+    );
+    let records = fixture.store.records(&branch).expect("records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].attempts, 2);
+    assert_eq!(records[0].layers.len(), 3);
+    assert!(branch_state.last_failure.is_none());
 }
 
 #[test]

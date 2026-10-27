@@ -242,7 +242,10 @@ async fn try_complete_review(
         .await?;
         return Ok(false);
     }
-    // Every configured layer's child must exist and have answered.
+    // Collect resident child transcripts when available. A delivered
+    // agent-message body in the conductor transcript is an independent
+    // answer source (ADR 0030), so a child that exited after sending need
+    // not remain in the resident roster.
     let mut answers: BTreeMap<String, String> = BTreeMap::new();
     let mut child_ids: BTreeMap<String, String> = BTreeMap::new();
     for layer in &profile.layers {
@@ -253,15 +256,14 @@ async fn try_complete_review(
         let Some(child) = sessions.iter().find(|row| {
             row.get("sessionName").and_then(Value::as_str) == Some(child_name.as_str())
         }) else {
-            return Ok(false);
+            continue;
         };
         let child_id = session_id(child)?;
         let messages = client.get_messages(&child_id).await?;
-        let Some(answer) = last_assistant_text(&messages) else {
-            return Ok(false);
-        };
-        answers.insert(layer.name.clone(), answer);
-        child_ids.insert(layer.name.clone(), child_id);
+        if let Some(answer) = last_assistant_text(&messages) {
+            answers.insert(layer.name.clone(), answer);
+            child_ids.insert(layer.name.clone(), child_id);
+        }
     }
     let transcript_after_children = client.get_messages(&conductor_id).await?;
     // A harvest miss means the conversation has not settled yet.
@@ -276,6 +278,59 @@ async fn try_complete_review(
             in_flight.base,
             in_flight.head
         ));
+    }
+    if harvested.layers.iter().any(|layer| {
+        layer
+            .answer
+            .contains("The packaged prime-agent-runtime directory was not found")
+    }) {
+        println!(
+            "big-brother observer: attempt {} of {}..{} on {branch} reported a missing packaged runtime",
+            in_flight.attempts, in_flight.base, in_flight.head
+        );
+        supervise_failure(
+            client,
+            store,
+            profile,
+            branch,
+            in_flight,
+            woken,
+            "runtime_unavailable",
+        )
+        .await?;
+        return Ok(false);
+    }
+    if !harvested.missing_layers.is_empty() {
+        // A synthesis can race live child persistence. Keep waiting in
+        // that case; only a terminal no-reply notice for an absent child
+        // proves this attempt cannot collect the missing answer.
+        let no_reply_layers = confirmed_no_reply_layers(
+            &harvested.missing_layers,
+            &harvested.no_reply_layers,
+            &in_flight.head,
+            &sessions,
+        );
+        if no_reply_layers.is_empty() {
+            return Ok(false);
+        }
+        println!(
+            "big-brother observer: attempt {} of {}..{} on {branch} has terminal no-reply from layer(s): {}",
+            in_flight.attempts,
+            in_flight.base,
+            in_flight.head,
+            no_reply_layers.join(", ")
+        );
+        supervise_failure(
+            client,
+            store,
+            profile,
+            branch,
+            in_flight,
+            woken,
+            "layer_no_reply",
+        )
+        .await?;
+        return Ok(false);
     }
     let record = ReviewRecord {
         version: 1,
@@ -307,6 +362,28 @@ async fn try_complete_review(
         in_flight.base, in_flight.head
     );
     Ok(true)
+}
+
+/// Missing layers become terminal only when the conductor reported a
+/// no-reply exit for that exact range's child and the child is no longer
+/// resident. A live child may still be persisting its final transcript.
+fn confirmed_no_reply_layers(
+    missing_layers: &[String],
+    no_reply_layers: &[String],
+    head: &str,
+    sessions: &[Value],
+) -> Vec<String> {
+    missing_layers
+        .iter()
+        .filter(|layer| no_reply_layers.contains(*layer))
+        .filter(|layer| {
+            let child_name = format!("{layer}-{head}");
+            !sessions.iter().any(|row| {
+                row.get("sessionName").and_then(Value::as_str) == Some(child_name.as_str())
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Whether the range's current attempt has exhausted its budget (ADR
@@ -486,7 +563,7 @@ fn wake_message(range: &ReviewRange, max_attempts: u32) -> String {
     if range.attempts > 1 {
         format!(
             "REVIEW_RANGE {}..{} END\n\
-             Retry attempt {} of {max_attempts}: the prior attempt timed out and its reviewers \
+             Retry attempt {} of {max_attempts}: the prior attempt failed and its reviewers \
              were cancelled. Dispatch every configured review layer fresh for this range, then \
              synthesize once all layers have replied.{marker_contract}",
             range.base, range.head, range.attempts
@@ -565,4 +642,26 @@ async fn ensure_client<'a>(
         *client = Some(DaemonClient::connect(socket_path).await?);
     }
     Ok(client.as_mut().expect("just connected"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEAD: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn only_an_absent_child_with_an_exact_no_reply_notice_is_terminal() {
+        let missing = vec!["project-fit".to_string(), "implementation".to_string()];
+        let no_reply = vec!["project-fit".to_string(), "requirements".to_string()];
+        let resident = vec![json!({
+            "sessionName": format!("project-fit-{HEAD}")
+        })];
+
+        assert!(confirmed_no_reply_layers(&missing, &no_reply, HEAD, &resident).is_empty());
+        assert_eq!(
+            confirmed_no_reply_layers(&missing, &no_reply, HEAD, &[]),
+            vec!["project-fit"]
+        );
+    }
 }
