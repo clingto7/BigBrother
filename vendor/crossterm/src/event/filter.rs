@@ -61,9 +61,13 @@ impl Filter for EventFilter {
     }
 }
 
+// read.rs's test battery is the only consumer; non-test builds of the
+// vendored crate would otherwise carry a dead struct under -D warnings.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct InternalEventFilter;
 
+#[cfg(test)]
 impl Filter for InternalEventFilter {
     fn eval(&self, _: &InternalEvent) -> bool {
         true

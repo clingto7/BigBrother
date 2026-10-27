@@ -14,6 +14,19 @@ edition = "2021"
 rust-version = "1.63.0"
 name = "crossterm"
 version = "0.28.1"
+
+# The vendored 0.28.1 sources gate the Windows backend through the bare
+# `winapi`/`crossterm_winapi` cfg names (vestigial pre-0.26 feature
+# spellings kept for the compile_error guards); without these
+# declarations every rustc new enough for `unexpected_cfgs` warns on all
+# four sites and the workspace's -D warnings gate turns them fatal.
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = [
+    'cfg(winapi)',
+    'cfg(crossterm_winapi)',
+    'cfg(feature, values("winapi", "crossterm_winapi"))',
+]
 authors = ["T. Post"]
 exclude = [
     "target",
