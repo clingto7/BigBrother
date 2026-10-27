@@ -85,8 +85,7 @@ concurrency:
 
 env:
   # The guard step reads this: an unconfigured release bot makes the nightly a
-  # green no-op with a notice (the flow is opt-in by wiring the App), while a
-  # configured-but-broken App fails the run loudly below.
+  # visible no-op, while a configured-but-broken App fails the run loudly below.
   HAS_RELEASE_BOT: ${{ secrets.RELEASE_BOT_CLIENT_ID != '' && secrets.RELEASE_BOT_PRIVATE_KEY != '' }}
 
 jobs:
@@ -103,7 +102,14 @@ jobs:
       - name: Guard (the release bot App gates the whole nightly flow)
         if: env.HAS_RELEASE_BOT != 'true'
         run: |
-          echo "::notice::the release-bot GitHub App is not configured (secrets RELEASE_BOT_CLIENT_ID / RELEASE_BOT_PRIVATE_KEY): the nightly cron is a no-op until the operator wires it - see the release-flow PR body's config checklist. No tag is ever cut while it is absent."
+          echo "::warning::the release-bot GitHub App is not configured (secrets RELEASE_BOT_CLIENT_ID / RELEASE_BOT_PRIVATE_KEY): this nightly run will not cut a beta tag."
+          {
+            echo "## Nightly beta tag not cut"
+            echo
+            echo "The release-bot GitHub App is not configured. This workflow run did not create a beta tag."
+            echo
+            echo "Configure repository secrets \`RELEASE_BOT_CLIENT_ID\` and \`RELEASE_BOT_PRIVATE_KEY\`, then rerun the nightly workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: The release bot token (a GitHub App installation, never a user PAT)
         if: env.HAS_RELEASE_BOT == 'true'
         id: app-token
