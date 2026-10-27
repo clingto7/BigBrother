@@ -580,6 +580,12 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
         String::from_utf8_lossy(&compiled.stderr)
     );
     let binary = split.path().join("prime-agent");
+    // The companion tools are a mandatory assembler payload (the Big
+    // Brother release-archive fix): plain copies of the fixture ELF.
+    let big_brother = split.path().join("big-brother");
+    let daemon = split.path().join("pa-daemon");
+    std::fs::copy(&binary, &big_brother).expect("companion fixture");
+    std::fs::copy(&binary, &daemon).expect("companion fixture");
     let split_run = python(
         &workspace_root()
             .join("scripts")
@@ -637,6 +643,10 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
             "x86_64-unknown-linux-gnu".as_ref(),
             "--binary".as_ref(),
             binary.as_os_str(),
+            "--big-brother-binary".as_ref(),
+            big_brother.as_os_str(),
+            "--daemon-binary".as_ref(),
+            daemon.as_os_str(),
             "--decoder".as_ref(),
             decoder.as_os_str(),
             "--catalog-assets".as_ref(),
