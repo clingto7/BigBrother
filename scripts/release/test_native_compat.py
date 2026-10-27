@@ -32,12 +32,20 @@ class NativeCompatibilityTests(unittest.TestCase):
         self.binary = self.root / "binary"
         self.binary.write_text("#!/bin/sh\nprintf '1.0.0\\n'\n")
         self.binary.chmod(0o755)
+        # The companion tools are a mandatory payload (the Big Brother
+        # release-archive fix): plain executable copies of the fixture.
+        self.companions = []
+        for name in ("big-brother", "pa-daemon"):
+            companion = self.root / name
+            shutil.copy2(self.binary, companion)
+            self.companions.append(companion)
 
     def assemble(self, target="aarch64-apple-darwin", stamp=None):
         staging = self.root / "stage"
         staging.mkdir()
         args = argparse.Namespace(
             repo_root=self.root, target=target, binary=self.binary,
+            big_brother_binary=self.companions[0], daemon_binary=self.companions[1],
             runtime_dir=None, catalog_assets=self.root, version="1.0.0", sha="a" * 40,
         )
         # Catalog validation has its own integration suite; this test exercises
