@@ -580,12 +580,6 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
         String::from_utf8_lossy(&compiled.stderr)
     );
     let binary = split.path().join("prime-agent");
-    // The companion tools are a mandatory assembler payload (the Big
-    // Brother release-archive fix): plain copies of the fixture ELF.
-    let big_brother = split.path().join("big-brother");
-    let daemon = split.path().join("pa-daemon");
-    std::fs::copy(&binary, &big_brother).expect("companion fixture");
-    std::fs::copy(&binary, &daemon).expect("companion fixture");
     let split_run = python(
         &workspace_root()
             .join("scripts")
@@ -613,6 +607,13 @@ fn assembled_archives_carry_the_platform_alias_the_reader_demands() {
     let decoder = split.path().join("prime-agent-1.2.3-linux-x64.debug.gz");
     assert!(binary.is_file(), "shipped fixture missing");
     assert!(decoder.is_file(), "decoder fixture missing");
+    // The companion tools are a mandatory assembler payload (the Big
+    // Brother release-archive fix): plain copies of the shipped ELF,
+    // staged after the split produced it.
+    let big_brother = split.path().join("big-brother");
+    let daemon = split.path().join("pa-daemon");
+    std::fs::copy(&binary, &big_brother).expect("companion fixture");
+    std::fs::copy(&binary, &daemon).expect("companion fixture");
 
     let scripts = workspace_root().join("scripts/release");
     let catalog = fixture.path().join("catalog-assets");
