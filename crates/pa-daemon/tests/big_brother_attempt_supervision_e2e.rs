@@ -732,8 +732,8 @@ fn an_attempt_that_dies_before_dispatch_fails_within_scans_not_the_budget() {
     assert_eq!(failure.reason, "turn_failed");
     let text = render_status(
         &load_repository_status(&QueryOptions {
-            agent_dir: fixture.agent_dir.clone(),
-            repo: fixture.repo.clone(),
+            agent_dir: fixture.agent_dir,
+            repo: fixture.repo,
         })
         .expect("status"),
     );

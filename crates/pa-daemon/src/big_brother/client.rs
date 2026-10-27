@@ -154,9 +154,8 @@ mod tests {
         let socket = dir.path().join("stale.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
         drop(listener); // the file outlives the listener: the stale shape
-        let error = match DaemonClient::connect(&socket).await {
-            Ok(_) => panic!("a stale socket file must refuse the connect"),
-            Err(error) => error,
+        let Err(error) = DaemonClient::connect(&socket).await else {
+            panic!("a stale socket file must refuse the connect");
         };
         let rendered = format!("{error:#}");
         assert!(
@@ -169,9 +168,8 @@ mod tests {
     async fn a_missing_socket_never_claims_a_leftover() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("absent.sock");
-        let error = match DaemonClient::connect(&socket).await {
-            Ok(_) => panic!("an absent socket path must fail the connect"),
-            Err(error) => error,
+        let Err(error) = DaemonClient::connect(&socket).await else {
+            panic!("an absent socket path must fail the connect");
         };
         let rendered = format!("{error:#}");
         assert!(

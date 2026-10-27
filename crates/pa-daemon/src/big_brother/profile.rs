@@ -404,7 +404,7 @@ mod tests {
             .expect("profile");
         assert_eq!(
             defaults.attempt_timeout(),
-            std::time::Duration::from_secs(1800)
+            std::time::Duration::from_mins(30)
         );
         assert_eq!(defaults.max_attempts(), 3);
         let body = serde_json::json!({

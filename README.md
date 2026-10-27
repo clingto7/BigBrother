@@ -59,11 +59,35 @@ tar -xzf "$archive" -C "$HOME/.local/bin"
 
 Replace `VERSION` and `PLATFORM` with the archive name shown on the release page (for example `0.10.1-beta.21` and `darwin-arm64`). Add `~/.local/bin` to `PATH` if needed. On Windows, the executable names end in `.exe`.
 
-Start the shared Prime Agent supervisor:
+## Configure model access
 
-```bash
-pa-daemon supervisor --agent-dir "$HOME/.prime/agent"
+Big Brother reviews through the Prime Agent model configuration, so a provider must be set up before enrollment. Two paths:
+
+- **Built-in providers** (Anthropic, OpenAI Codex, GitHub Copilot, xAI, and the Prime Inference subscription): run `prime-agent` once and use `/login` inside the interactive UI. The credentials land in `~/.prime/agent/auth.json`, which the daemon and the review sessions share.
+- **Any OpenAI-compatible provider** (DeepSeek, OpenRouter, a self-hosted gateway): declare it in `~/.prime/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "deepseek": {
+      "api": "openai-completions",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-...",
+      "models": [
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek Chat",
+          "api": "openai-completions",
+          "contextWindow": 128000,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}
 ```
+
+The model selector is `provider/model` — the example above is `deepseek/deepseek-chat`, and that is what `big-brother init --main-model` takes. Verify before enrolling: `prime-agent model list` shows what the daemon can see, and one interactive `prime-agent` turn on the chosen model proves the credentials work.
 
 ## Quick start from source
 
@@ -112,27 +136,39 @@ big-brother init \
 
 `big-brother status` accepts `--repo` and `--agent-dir` with the same meanings. Both commands print their full flag surface with `--help`, and `--version` reports the shipped version.
 
+The model and layer flags shape the review profile written at first enrollment; on a later `init` the existing profile wins and the flags are ignored. To change models afterwards, edit the profile file `init` prints (`~/.prime/agent/big-brother/repos/<repo>/profile.json`) — same JSON keys, camelCase.
+
 The existing Prime Agent daemon must be running before `init`. If you manage it manually, use the same agent directory and socket for both processes:
 
 ```bash
 pa-daemon supervisor --agent-dir "$HOME/.prime/agent"
 ```
 
-Install the background observer. The script creates a macOS LaunchAgent or Linux systemd user unit, keeps the observer in the foreground, and leaves secrets outside the service definition:
+Install the background services. The script creates macOS LaunchAgents or Linux systemd user units and leaves secrets outside the service definitions. Without `--supervisor` it installs the observer only — for a machine where you also run Prime Agent interactively, whose client starts the supervisor on demand. With `--supervisor` it also installs the supervisor itself, so reviews keep running across reboots with no interactive session ever opened; this is the posture for an unattended review box. Pass `--socket` when the supervisor must not take the default socket path (for example next to a TypeScript Prime Agent daemon), and keep that flag on `big-brother init` and `big-brother status` too — every client must agree on the same socket:
 
 ```bash
 scripts/big-brother-service.sh install \
   --agent-dir "$HOME/.prime/agent" \
+  --supervisor \
   --binary "$(command -v pa-daemon)"
 ```
 
-The script also accepts `--interval-secs N` (the scan interval, default 30) and `--socket PATH`. Pass `--socket` when the supervisor does not serve the standard socket — for example on a machine that also runs the TS Prime Agent daemon on the default path, where the Rust supervisor must listen elsewhere and every client (init, observer, the installed service) must agree on the same explicit path:
+The script also accepts `--interval-secs N` (the scan interval, default 30). `uninstall` removes both services and never deletes review records or the worktree:
+
+```bash
+scripts/big-brother-service.sh uninstall
+```
+
+On a machine that also runs the TypeScript Prime Agent daemon on the default socket, put the Rust supervisor on an explicit path and keep that flag on every client:
 
 ```bash
 scripts/big-brother-service.sh install \
   --agent-dir "$HOME/.prime/agent" \
+  --supervisor \
   --socket "/tmp/big-brother-daemon.sock" \
   --binary "$(command -v pa-daemon)"
+
+big-brother init --socket "/tmp/big-brother-daemon.sock" ...
 ```
 
 `PA_DAEMON_BIN` is the `--binary` fallback when `pa-daemon` is not on `PATH`.
@@ -141,12 +177,6 @@ Inspect enrollment and review progress:
 
 ```bash
 big-brother status --repo "$HOME/review-worktrees/REPOSITORY"
-```
-
-Remove the platform service without deleting review records or the worktree:
-
-```bash
-scripts/big-brother-service.sh uninstall
 ```
 
 ## Runtime behavior
@@ -177,7 +207,7 @@ The observer is a separate foreground process. `launchd` or `systemd --user` own
 
 Give your setup agent this prompt:
 
-> Configure Big Brother for this repository. Use a dedicated clean worktree, separate from my daily checkout. Verify that `big-brother`, `pa-daemon`, and the Prime Agent daemon are available. Initialize the worktree with `big-brother init` using the existing daemon socket and my chosen review models, then install the platform service with `scripts/big-brother-service.sh install --binary "$(command -v pa-daemon)"`. Do not put tokens or secret values in a plist, systemd unit, repository file, or commit. Show the service path, agent directory, tracked branch, and `big-brother status` output. Stop if the worktree is dirty or is the same checkout I use for daily editing.
+> Configure Big Brother for this repository. Use a dedicated clean worktree, separate from my daily checkout. Verify that `big-brother`, `pa-daemon`, and the Prime Agent daemon are available, and that a model provider is configured (`prime-agent model list`; configure access per the README's "Configure model access" section if not). Initialize the worktree with `big-brother init` using the existing daemon socket and my chosen review models, then install the platform services with `scripts/big-brother-service.sh install --binary "$(command -v pa-daemon)"` — add `--supervisor` only if I confirm this box should review unattended. Do not put tokens or secret values in a plist, systemd unit, repository file, or commit. Show the service path, agent directory, tracked branch, and `big-brother status` output. Stop if the worktree is dirty or is the same checkout I use for daily editing.
 
 ## Development
 
