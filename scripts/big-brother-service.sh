@@ -54,6 +54,11 @@ observer_unit="$systemd_dir/big-brother-observer.service"
 supervisor_unit="$systemd_dir/big-brother-supervisor.service"
 log_dir="$HOME/Library/Logs/BigBrother"
 
+# The kernel bootstrap shells out to uv (Homebrew or ~/.local/bin, never
+# /usr/bin), and platform services run with a minimal PATH: hand both
+# service definitions the search path the user's shell would have.
+service_path="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 socket_args_observer=""
 socket_arg_supervisor=""
 if [ -n "$socket" ]; then
@@ -78,6 +83,7 @@ install_macos() {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PRIME_AGENT_CODING_AGENT_DIR</key><string>$agent_dir</string>
+    <key>PATH</key><string>$service_path</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -107,6 +113,7 @@ EOF_PLIST
   <key>EnvironmentVariables</key>
   <dict>
     <key>PRIME_AGENT_CODING_AGENT_DIR</key><string>$agent_dir</string>
+    <key>PATH</key><string>$service_path</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -144,6 +151,7 @@ ExecStart=$binary supervisor --agent-dir $agent_dir $socket_arg_supervisor
 Restart=always
 RestartSec=10
 Environment=PRIME_AGENT_CODING_AGENT_DIR=$agent_dir
+Environment=PATH=$service_path
 
 [Install]
 WantedBy=default.target
@@ -163,6 +171,7 @@ ExecStart=$binary observer --agent-dir $agent_dir --interval-secs $interval_secs
 Restart=always
 RestartSec=10
 Environment=PRIME_AGENT_CODING_AGENT_DIR=$agent_dir
+Environment=PATH=$service_path
 
 [Install]
 WantedBy=default.target
