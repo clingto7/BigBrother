@@ -147,6 +147,7 @@ mod tests {
     /// A refused connect against a leftover socket file (a bound listener
     /// dropped without unlinking) names the stale file, so an operator can
     /// tell a dead daemon's leftover from a wrong path.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_refused_connect_against_a_stale_socket_file_names_the_leftover() {
         let dir = tempfile::TempDir::new().expect("temp dir");
