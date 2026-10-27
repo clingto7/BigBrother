@@ -59,6 +59,8 @@ tar -xzf "$archive" -C "$HOME/.local/bin"
 
 Replace `VERSION` and `PLATFORM` with the archive name shown on the release page (for example `0.10.1-beta.21` and `darwin-arm64`). Add `~/.local/bin` to `PATH` if needed. On Windows, the executable names end in `.exe`.
 
+Updating is the same recipe against the newer archive: download, verify, and re-extract over `~/.local/bin`, then restart the supervisor service if `--supervisor` installed one (`launchctl kickstart -k "gui/$(id -u)/ai.primeintellect.big-brother-supervisor"`, or `systemctl --user restart big-brother-supervisor.service`). The observer re-reads its binary on each restart by launchd or systemd.
+
 ## Configure model access
 
 Big Brother reviews through the Prime Agent model configuration, so a provider must be set up before enrollment. Two paths:
