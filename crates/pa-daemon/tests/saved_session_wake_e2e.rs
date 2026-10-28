@@ -953,6 +953,31 @@ fn send_to_a_saved_session_after_daemon_restart_wakes_it_and_runs_the_turn() {
         &json!({ "type": "kill", "activeSessionId": active_id }),
     );
     assert_eq!(client.read_response("k1")["success"], true, "kill failed");
+    // A stale longer name must not intercept the exact-name wake.
+    client.send_command(
+        "c-stale",
+        &json!({
+            "type": "create",
+            "name": "alpha-for-test",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    let stale = client.read_response("c-stale");
+    assert_eq!(stale["success"], true, "stale create failed: {stale}");
+    let stale_id = stale["data"]["id"]
+        .as_str()
+        .or_else(|| stale["data"]["activeSessionId"].as_str())
+        .expect("stale active id");
+    client.send_command(
+        "k-stale",
+        &json!({ "type": "kill", "activeSessionId": stale_id }),
+    );
+    assert_eq!(client.read_response("k-stale")["success"], true);
     client.send_command("l1", &json!({ "type": "list" }));
     let list = client.read_response("l1");
     assert_eq!(
@@ -974,8 +999,8 @@ fn send_to_a_saved_session_after_daemon_restart_wakes_it_and_runs_the_turn() {
             }
         }
     };
-    assert_eq!(saved_rows.len(), 1, "the killed session is saved");
-    assert_eq!(saved_rows[0]["name"], "alpha");
+    assert_eq!(saved_rows.len(), 2, "both killed sessions are saved");
+    assert!(saved_rows.iter().any(|row| row["name"] == "alpha"));
 
     // Simulate a machine restart: the monitor can address the saved session
     // after a new daemon starts, without retaining the old active worker id.
@@ -1070,7 +1095,7 @@ fn send_to_a_saved_session_after_daemon_restart_wakes_it_and_runs_the_turn() {
         "s5",
         &json!({
             "type": "send_message",
-            "targetActiveSessionId": &session_id[..8],
+            "targetActiveSessionId": session_id,
             "message": "by id",
         }),
     );
@@ -1078,6 +1103,6 @@ fn send_to_a_saved_session_after_daemon_restart_wakes_it_and_runs_the_turn() {
     assert_eq!(by_id["success"], true, "send by session id failed: {by_id}");
     assert_eq!(
         by_id["data"]["target"]["activeSessionId"], woken_id,
-        "the session-id prefix resolved to the resident worker: {by_id}"
+        "the session id resolved to the resident worker: {by_id}"
     );
 }

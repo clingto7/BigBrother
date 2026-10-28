@@ -546,13 +546,32 @@ impl SessionRegistry {
     /// session name; errors for unknown and ambiguous selectors (the
     /// quarantined miss drives reconciliation).
     pub(crate) async fn resolve(&self, selector: &str) -> Result<Arc<ResidentWorker>> {
+        let residents = self.list().await;
+        let mut exact_names = Vec::new();
+        for resident in &residents {
+            if resident.identity_quarantined() {
+                continue;
+            }
+            let (_, _, name) = resident.labels().await;
+            if name == selector && !name.is_empty() {
+                exact_names.push(Arc::clone(resident));
+            }
+        }
+        if exact_names.len() == 1 {
+            return Ok(exact_names.pop().expect("one exact name"));
+        }
+        if exact_names.len() > 1 {
+            return Err(anyhow!(
+                "Ambiguous active session \"{selector}\": duplicate name"
+            ));
+        }
         if let Some(resident) = self.get(selector).await {
             if !resident.identity_quarantined() {
                 return Ok(resident);
             }
         }
         let mut matches: Vec<(Arc<ResidentWorker>, String, String)> = Vec::new();
-        for resident in self.list().await {
+        for resident in residents {
             if resident.identity_quarantined() {
                 continue;
             }
@@ -693,6 +712,23 @@ mod tests {
         let by_name = registry.resolve("faux").await.expect("name matches");
         assert_eq!(by_name.worker_id, "aaa111bbb222");
         assert!(registry.resolve("zzz").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn exact_name_wins_over_an_id_suffix() {
+        let registry = SessionRegistry::new();
+        registry.insert(resident("review-yadig")).await;
+        let named = resident("other-worker");
+        named
+            .descriptor
+            .lock()
+            .await
+            .create_command
+            .rest
+            .insert("name".to_string(), Value::from("review-yadig"));
+        registry.insert(named).await;
+        let found = registry.resolve("review-yadig").await.expect("exact name");
+        assert_eq!(found.worker_id, "other-worker");
     }
 
     #[tokio::test]

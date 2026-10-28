@@ -16,10 +16,20 @@ fn catalog_session_match<'a>(
     sessions: impl IntoIterator<Item = &'a SessionInfo>,
     selector: &str,
 ) -> Result<Option<&'a SessionInfo>> {
-    let matches: Vec<&SessionInfo> = sessions
-        .into_iter()
-        .filter(|info| info.id.starts_with(selector) || info.name.as_deref() == Some(selector))
+    let sessions: Vec<_> = sessions.into_iter().collect();
+    let exact_names: Vec<_> = sessions
+        .iter()
+        .copied()
+        .filter(|info| info.name.as_deref() == Some(selector))
         .collect();
+    let matches: Vec<_> = if exact_names.is_empty() {
+        sessions
+            .into_iter()
+            .filter(|info| info.id.starts_with(selector))
+            .collect()
+    } else {
+        exact_names
+    };
     match matches.len() {
         0 => Ok(None),
         1 => Ok(Some(matches[0])),
@@ -132,6 +142,31 @@ mod tests {
         write_session(&dir, "/work/a", Some("alpha"));
         let error = resolve_saved_session(&dir, &archive, "alpha", "/work/a").unwrap_err();
         assert_eq!(error.to_string(), "Ambiguous session selector \"alpha\"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exact_name_wins_over_an_id_prefix() {
+        let dir = temp_dir();
+        let (id, _) = write_session(&dir, "/work/a", Some("review-yadig"));
+        let (other_id, _) = write_session(&dir, "/work/a", Some("other"));
+        let sessions = vec![
+            SessionInfo {
+                id: "review-yadig-for-test".to_string(),
+                ..list_sessions(&dir)
+                    .into_iter()
+                    .find(|s| s.id == other_id)
+                    .unwrap()
+            },
+            list_sessions(&dir)
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap(),
+        ];
+        let found = catalog_session_match(sessions.iter(), "review-yadig")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
