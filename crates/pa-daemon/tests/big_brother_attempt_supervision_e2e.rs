@@ -226,7 +226,7 @@ fn serve_review(
                 chunk(
                     &json!({
                         "role": "assistant",
-                        "content": "The packaged prime-agent-runtime directory was not found"
+                        "content": "I cannot start work: kernel startup failed after 11ms: uv is required to set up the Python kernel"
                     }),
                     None,
                 ),
@@ -627,7 +627,7 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
 }
 
 #[test]
-fn a_missing_packaged_runtime_fails_the_attempt_and_the_retry_completes() {
+fn a_failed_kernel_boot_fails_the_attempt_and_the_retry_completes() {
     let fixture = runtime_failure_fixture("repo-runtime-retry", 2);
     let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let head = commit_change(&fixture.repo, "changed\n", "change");

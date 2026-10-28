@@ -280,9 +280,14 @@ async fn try_complete_review(
         ));
     }
     if harvested.layers.iter().any(|layer| {
-        layer
-            .answer
-            .contains("The packaged prime-agent-runtime directory was not found")
+        [
+            "The packaged prime-agent-runtime directory was not found",
+            "kernel startup failed",
+            "fails to boot",
+            "uv is required to set up the Python kernel",
+        ]
+        .iter()
+        .any(|phrase| layer.answer.contains(phrase))
     }) {
         println!(
             "big-brother observer: attempt {} of {}..{} on {branch} reported a missing packaged runtime",
