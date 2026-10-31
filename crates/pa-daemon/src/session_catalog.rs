@@ -150,7 +150,7 @@ mod tests {
         let dir = temp_dir();
         let (id, _) = write_session(&dir, "/work/a", Some("review-yadig"));
         let (other_id, _) = write_session(&dir, "/work/a", Some("other"));
-        let sessions = vec![
+        let sessions = [
             SessionInfo {
                 id: "review-yadig-for-test".to_string(),
                 ..list_sessions(&dir)
