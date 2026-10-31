@@ -155,8 +155,15 @@ async fn observe_repo(
             eprintln!("big-brother observer: branch {branch} update skipped: {error}");
             continue;
         }
+        let head = match branch_head(&git_root, branch) {
+            Ok(head) => head,
+            Err(error) => {
+                store.record_observation_failure(branch, "head_failed", &error.to_string())?;
+                eprintln!("big-brother observer: branch {branch} head skipped: {error}");
+                continue;
+            }
+        };
         store.clear_observation_failure(branch)?;
-        let head = branch_head(&git_root, branch)?;
         match store.admit(branch, &head)? {
             Admission::Admitted(range) => {
                 println!(

@@ -22,6 +22,15 @@ Repositories without an `origin` remain in local-observation mode for
 development and existing enrollments; the observer still refuses user changes
 before scanning.
 
+Each Git command has a 90-second deadline, including output collection.
+The observer starts Git in its own process group and kills that group on
+timeout so SSH and credential-helper descendants cannot hold the scan's
+pipes open. A fetch timeout records `fetch_failed`; failure to read the
+branch head records `head_failed`. Both skip that branch and continue the
+remaining branches, enrolled repositories, and pending record delivery.
+The next successful observation clears the failure. This bounds the
+existing sequential scan without adding concurrent worktree mutations.
+
 The service templates configure paths, the shared socket, interval, PATH, and
 logs, but never embed secrets. Installation and removal commands generate and
 manage the LaunchAgent or systemd user unit without deleting review state,

@@ -1,6 +1,9 @@
 //! Reading and advancing the watched work tree's git facts.
 
 use std::path::Path;
+use std::process::Stdio;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
@@ -35,15 +38,54 @@ impl WorktreeSyncError {
 
 /// Run one git command in the work tree and return its trimmed stdout.
 fn git(git_root: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
+    // Bound local commands too: a credential helper, hook, or stalled
+    // filesystem must not leave observation waiting indefinitely.
+    const TIMEOUT: Duration = Duration::from_secs(90);
+    let mut command = std::process::Command::new("git");
+    command
         .arg("-C")
         .arg(git_root)
         .args(args)
         // Observation must not contend with a user's commit for the index
         // lock; status can refresh the index unless optional locks are off.
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    pa_core::platform::process::set_new_process_group(&mut command);
+    let child = command
+        .spawn()
         .with_context(|| format!("running git {} in {}", args.join(" "), git_root.display()))?;
+    let pid = i32::try_from(child.id()).expect("OS process IDs fit in i32");
+    let (finished, completion) = mpsc::channel();
+    // The watchdog stays armed through output collection, not only process
+    // exit: SSH/helper descendants can keep stdout/stderr pipes open. Killing
+    // the isolated process group closes those pipes; wait_with_output reaps
+    // Git before returning. Normal completion wakes the watchdog immediately.
+    let (output, timed_out) = std::thread::scope(|scope| {
+        let watchdog = scope.spawn(move || match completion.recv_timeout(TIMEOUT) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !pa_core::platform::process::kill_process_group_or_pid(pid) {
+                    eprintln!("big-brother observer: could not kill timed-out git process {pid}");
+                }
+                true
+            }
+        });
+        let output = child.wait_with_output();
+        // A disconnected receiver means the timeout already fired.
+        let _ = finished.send(());
+        (output, watchdog.join().expect("git watchdog panicked"))
+    });
+    anyhow::ensure!(
+        !timed_out,
+        "git {} in {} timed out after {} seconds",
+        args.join(" "),
+        git_root.display(),
+        TIMEOUT.as_secs()
+    );
+    let output = output.context("collecting git output")?;
     if !output.status.success() {
         anyhow::bail!(
             "git {} in {}: {}",

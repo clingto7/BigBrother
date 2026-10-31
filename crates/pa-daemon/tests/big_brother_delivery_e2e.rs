@@ -408,10 +408,10 @@ fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T 
 /// init. The temp dir drops after the daemon (field order).
 struct Fixture {
     /// Held for teardown order: drops (killing the daemon) before
-    /// `_dir` removes the daemon's directories.
+    /// `dir` removes the daemon's directories.
     #[allow(dead_code)]
     daemon: Daemon,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     repo: PathBuf,
     agent_dir: PathBuf,
     socket: PathBuf,
@@ -499,7 +499,7 @@ fn fixture(repo_dir_name: &str) -> Fixture {
     let store = RepositoryStateStore::open(&agent_dir, &repo);
     Fixture {
         daemon,
-        _dir: dir,
+        dir,
         repo,
         agent_dir,
         socket,
@@ -662,4 +662,234 @@ fn a_failed_channel_retries_on_a_later_scan() {
     assert_eq!(bark.last_error, None);
     assert_eq!(bark_requests.lock().expect("bark lock").len(), 2);
     assert_eq!(github_requests.lock().expect("github lock").len(), 1);
+}
+
+#[test]
+fn a_hanging_fetch_does_not_block_observation_or_delivery() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = fixture("repo-fetch-timeout");
+    let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let base = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let head = commit_change(&fixture.repo, "changed\n", "change");
+    fixture.store.admit(&branch, &head).unwrap();
+    fixture
+        .store
+        .complete(
+            serde_json::from_value(json!({
+                "version": 1, "branch": branch, "base": base, "head": head,
+                "conclusion": "already reviewed"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    // A second branch must still be visited after the fetch times out.
+    let later_branch = "zz-later";
+    fixture.store.seed_cursor(later_branch, &head).unwrap();
+    // Another enrollment in the same scan must recover its previous failure
+    // even when its neighbor's fetch hangs.
+    let other_repo = fixture.dir.path().join("other-repo");
+    std::fs::create_dir(&other_repo).unwrap();
+    git(&other_repo, &["init", "-q", "-b", "main"]);
+    git(&other_repo, &["commit", "--allow-empty", "-qm", "baseline"]);
+    let other_head = git(&other_repo, &["rev-parse", "HEAD"]);
+    let other_store = RepositoryStateStore::open(&fixture.agent_dir, &other_repo);
+    other_store.seed_cursor("main", &other_head).unwrap();
+    other_store
+        .record_observation_failure("main", "fetch_failed", "prior failure")
+        .unwrap();
+    std::fs::copy(
+        pa_daemon::big_brother::profile::profile_path(&fixture.agent_dir, &fixture.repo),
+        pa_daemon::big_brother::profile::profile_path(&fixture.agent_dir, &other_repo),
+    )
+    .unwrap();
+    git(
+        &fixture.repo,
+        &["config", &format!("branch.{branch}.remote"), "origin"],
+    );
+
+    let shim_dir = fixture.dir.path().join("shim");
+    std::fs::create_dir(&shim_dir).unwrap();
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real_git = String::from_utf8(real_git.stdout).unwrap();
+    let shim = shim_dir.join("git");
+    // Keep a descendant holding the output pipes: killing only the shell
+    // must not count as successful timeout cleanup.
+    std::fs::write(
+        &shim,
+        format!(
+            r#"#!/bin/sh
+if [ "$3" = fetch ]; then
+  echo $$ > "$FETCH_PID_FILE"
+  sleep 600 &
+  echo $! > "$FETCH_CHILD_PID_FILE"
+  wait
+else
+  exec '{}' "$@"
+fi
+"#,
+            real_git.trim()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pid_file = fixture.dir.path().join("fetch.pid");
+    let child_pid_file = fixture.dir.path().join("fetch-child.pid");
+    let (bark_url, requests) = spawn_bark_mock(0);
+    let mut observer = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+        .args(["observer", "--once", "--socket"])
+        .arg(&fixture.socket)
+        .arg("--agent-dir")
+        .arg(&fixture.agent_dir)
+        .env(
+            "PATH",
+            format!("{}:{}", shim_dir.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("FETCH_PID_FILE", &pid_file)
+        .env("FETCH_CHILD_PID_FILE", &child_pid_file)
+        .env("BARK_KEY", "e2e-bark-key")
+        .env("BARK_SERVER", &bark_url)
+        .env_remove("BIG_BROTHER_GITHUB_TOKEN")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(100);
+    let finished = loop {
+        if let Some(status) = observer.try_wait().unwrap() {
+            break status.success();
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // Always reap the observer and clean up the shim, including on red.
+    if !finished {
+        observer.kill().unwrap();
+        observer.wait().unwrap();
+        for file in [&pid_file, &child_pid_file] {
+            if let Ok(pid) = std::fs::read_to_string(file) {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid.trim().parse().unwrap()),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+    }
+    assert!(
+        finished,
+        "hanging fetch froze the observer scan past its deadline"
+    );
+    let state = fixture.store.load().unwrap();
+    let failure = state.branches[&branch]
+        .last_observation_failure
+        .as_ref()
+        .unwrap();
+    assert_eq!(failure.kind, "fetch_failed");
+    assert!(failure.message.contains("timed out"), "{failure:?}");
+    assert_eq!(
+        state.branches[later_branch]
+            .last_observation_failure
+            .as_ref()
+            .unwrap()
+            .kind,
+        "wrong_branch"
+    );
+    assert!(fixture.store.records(&branch).unwrap()[0].delivery["bark"].delivered());
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert!(other_store.load().unwrap().branches["main"]
+        .last_observation_failure
+        .is_none());
+    for file in [&pid_file, &child_pid_file] {
+        let pid: i32 = std::fs::read_to_string(file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        wait_until(Duration::from_secs(5), || {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+                .is_err()
+                .then_some(())
+        });
+    }
+    // The next pass succeeds with the real git and clears the prior failure.
+    git(
+        &fixture.repo,
+        &["config", "--unset", &format!("branch.{branch}.remote")],
+    );
+    observer_once(
+        &fixture.socket,
+        &fixture.agent_dir,
+        &[("BARK_KEY", ""), ("BIG_BROTHER_GITHUB_TOKEN", "")],
+    );
+    assert!(fixture.store.load().unwrap().branches[&branch]
+        .last_observation_failure
+        .is_none());
+}
+
+#[test]
+fn a_failed_head_read_does_not_skip_pending_delivery() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = fixture("repo-head-failure");
+    let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let base = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let head = commit_change(&fixture.repo, "changed\n", "change");
+    fixture.store.admit(&branch, &head).unwrap();
+    fixture
+        .store
+        .complete(
+            serde_json::from_value(json!({
+                "version": 1, "branch": branch, "base": base, "head": head,
+                "conclusion": "already reviewed"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let shim_dir = fixture.dir.path().join("shim");
+    std::fs::create_dir(&shim_dir).unwrap();
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real_git = String::from_utf8(real_git.stdout).unwrap();
+    let shim = shim_dir.join("git");
+    std::fs::write(
+        &shim,
+        format!(
+            r#"#!/bin/sh
+if [ "$3" = rev-parse ] && [ "$4" != --abbrev-ref ]; then
+  echo 'head read failed' >&2
+  exit 1
+fi
+exec '{}' "$@"
+"#,
+            real_git.trim()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (bark_url, requests) = spawn_bark_mock(0);
+    let path = format!("{}:{}", shim_dir.display(), std::env::var("PATH").unwrap());
+    observer_once(
+        &fixture.socket,
+        &fixture.agent_dir,
+        &[
+            ("PATH", &path),
+            ("BARK_KEY", "e2e-bark-key"),
+            ("BARK_SERVER", &bark_url),
+            ("BIG_BROTHER_GITHUB_TOKEN", ""),
+        ],
+    );
+    let state = fixture.store.load().unwrap();
+    assert!(
+        state.branches[&branch].last_observation_failure.is_some(),
+        "head-read failure must be recorded"
+    );
+    assert!(fixture.store.records(&branch).unwrap()[0].delivery["bark"].delivered());
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
