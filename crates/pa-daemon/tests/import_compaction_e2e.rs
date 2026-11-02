@@ -274,22 +274,15 @@ fn grown_fixture(dir: &Path, turns: usize) -> PathBuf {
 
 /// The durable session rows of `type`, re-read from the imported copy.
 fn session_rows(harness: &Harness, type_: &str) -> Vec<Value> {
-    let session_dir = harness.dir.path().join("agent").join("sessions");
-    let file = std::fs::read_dir(&session_dir)
-        .expect("session dir readable")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("grown-import"))
-        })
-        .expect("the imported session's copy in the session dir");
+    // Import preserves the input filename. A prefix search can select the
+    // sibling grown-import.window-cache.json instead, depending on directory
+    // iteration order, and falsely report that all imported rows are missing.
+    let file = harness.dir.path().join("agent/sessions/grown-import.jsonl");
     std::fs::read_to_string(file)
         .expect("session file readable")
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .map(|line| serde_json::from_str::<Value>(line.trim()).expect("valid session JSONL row"))
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some(type_))
         .collect()
 }
