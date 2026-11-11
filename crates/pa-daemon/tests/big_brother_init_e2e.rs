@@ -111,7 +111,12 @@ fn serve_review(mut stream: TcpStream) -> std::io::Result<()> {
     let data = if model == "main" {
         match dispatch_target {
             Some((base, head)) => {
-                let layers = ["requirements", "project-fit", "implementation"];
+                let layers: &[&str] =
+                    if request_text.contains("Dispatch only these layers: comprehensive") {
+                        &["comprehensive"]
+                    } else {
+                        &["requirements", "project-fit", "implementation"]
+                    };
                 let calls: Vec<Value> = layers
                     .iter()
                     .enumerate()
@@ -464,6 +469,62 @@ fn init_enrolls_reviews_queries_and_survives_a_restart() {
     assert!(branch_state.in_flight.is_none());
     assert_eq!(store.records(&branch).expect("records").len(), 1);
     drop(restarted);
+}
+
+#[test]
+fn a_comprehensive_reviewer_covers_the_full_range_through_the_record() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("code.txt"), "baseline\n").expect("baseline");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "baseline"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions");
+    let url = spawn_review_mock();
+    let models: Vec<Value> = ["main", "comprehensive"].into_iter().map(|id| json!({
+        "id": id, "name": id, "api": "openai-completions", "contextWindow": 128000, "maxTokens": 4096
+    })).collect();
+    std::fs::write(agent_dir.join("models.json"), json!({"providers": {"prime-inference": {
+        "api": "openai-completions", "baseUrl": url.to_string_lossy(), "apiKey": "sk-review-test",
+        "models": models
+    }}}).to_string()).expect("models");
+    let profile_path = pa_daemon::big_brother::profile::profile_path(&agent_dir, &repo);
+    std::fs::create_dir_all(profile_path.parent().expect("profile parent")).expect("profile dir");
+    std::fs::write(&profile_path, json!({
+        "version": 1, "sessionName": "review-repo", "mainModel": "prime-inference/main",
+        "intensity": "full", "layers": [{"name": "comprehensive", "model": "prime-inference/comprehensive"}]
+    }).to_string()).expect("profile");
+    let socket = dir.path().join("daemon.sock");
+    let daemon = spawn_daemon(&socket, &agent_dir);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(run_init(init_options(&socket, &agent_dir, &repo)))
+        .expect("init");
+    std::fs::write(repo.join("code.txt"), "changed\n").expect("change");
+    git(&repo, &["add", "code.txt"]);
+    git(&repo, &["commit", "-qm", "change"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let store = RepositoryStateStore::open(&agent_dir, &repo);
+    wait_until(Duration::from_secs(120), || {
+        observer_once(&socket, &agent_dir);
+        let state = store.load().expect("state");
+        (state.branches[&branch].cursor.as_deref() == Some(head.as_str())).then_some(())
+    });
+    let records = store.records(&branch).expect("records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].base, base);
+    assert_eq!(records[0].head, head);
+    assert_eq!(records[0].layers.len(), 1);
+    assert_eq!(records[0].layers[0].layer, "comprehensive");
+    assert!(records[0].evidence_id.is_some());
+    assert!(records[0].conclusion.is_some());
+    drop(daemon);
 }
 
 /// The conductor-presence contract (ADR 0023's wake-by-name alignment):
