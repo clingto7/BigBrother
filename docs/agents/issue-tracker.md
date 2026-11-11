@@ -2,6 +2,8 @@
 
 Issues and specs for Big Brother itself live as GitHub Issues. Use the `gh`
 CLI for Big Brother's own planning and lifecycle operations.
+The `clingto7/BigBrother` repository has Issues enabled. Publish completed
+implementation specs there with the `ready-for-agent` label.
 
 ## Watched repository review findings
 

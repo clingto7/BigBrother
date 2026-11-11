@@ -2,6 +2,8 @@
 
 Status: Accepted for the next design
 
+Coverage and reviewer-topology decisions below are revised by ADR 0032.
+
 For each Review range, Big Brother dispatches child reviewers across levels of
 assessment: verifiable syntax, formatting, and commit-message requirements;
 fit with documented project rules and direction; and quality of the chosen

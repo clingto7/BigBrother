@@ -82,9 +82,9 @@ against the repository's project policy and context.
 
 ### Review range
 
-A bounded change from the last reviewed revision to an observed branch head
-that receives one overall review synthesis. Individual pushed commits remain
-identifiable within the range.
+A bounded change from the last completed revision to an observed branch head.
+When review is enabled it receives one overall review synthesis. Individual
+pushed commits remain identifiable within the range.
 
 ### Review layer
 
@@ -97,6 +97,19 @@ layer's reviewer supplies evidence and proposals for the final synthesis.
 The bounded set of questions a review is expected to answer. The initial
 scope spans verifiable requirements, fit with project rules and direction,
 and implementation quality, with conclusions tied to evidence.
+
+### Review intensity
+
+The repository's configured cumulative coverage for a Review range: no review,
+verifiable requirements, requirements plus project fit, or all three Review
+layers including implementation quality. It is fixed when a range is admitted.
+It does not set the execution budget.
+
+### Monitoring-only mode
+
+The no-review intensity. Big Brother observes branch advances and notifies the
+operator of the Repository and each commit message in the Review range, without
+asserting an assessment of that range.
 
 ### Review profile
 
