@@ -463,7 +463,7 @@ mod tests {
             &path,
             serde_json::json!({
                 "version": 1, "sessionName": "hand-placed", "mainModel": "p/m",
-                "layers": [{ "name": "solo", "model": "p/solo" }]
+                "layers": [{ "name": "comprehensive", "model": "p/solo" }]
             })
             .to_string(),
         )

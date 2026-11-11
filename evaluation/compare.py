@@ -32,6 +32,10 @@ def usage(agent_dir):
     totals = {key: 0 for key in ("requests", "input", "cacheRead", "cacheWrite", "output")}
     estimate = 0.0
     priced_requests = 0
+    raw_cost = 0.0
+    raw_cost_requests = 0
+    ambiguous_cost = False
+    cost_records = []
     session_ids = []
     for path in sorted(agent_dir.rglob("*.jsonl")):
         if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", path.stem):
@@ -52,11 +56,25 @@ def usage(agent_dir):
             for key in ("input", "cacheRead", "cacheWrite", "output"):
                 totals[key] += amount.get(key, 0) or 0
             cost = amount.get("cost")
-            if isinstance(cost, dict):
-                estimate += cost.get("total", 0) or 0
-                priced_requests += 1
-    totals["catalogEstimatedCost"] = estimate if priced_requests == totals["requests"] else None
+            total = cost.get("total") if isinstance(cost, dict) else None
+            provider = message.get("provider")
+            # OpenRouter may replace the catalog calculation with provider billing.
+            # The session format does not retain which path produced this value.
+            provenance = "ambiguous" if provider == "openrouter" else "catalogEstimate"
+            if isinstance(total, (int, float)):
+                raw_cost += total
+                raw_cost_requests += 1
+                if provenance == "catalogEstimate":
+                    estimate += total
+                    priced_requests += 1
+            if provenance == "ambiguous":
+                ambiguous_cost = True
+            cost_records.append({"provider": provider, "model": message.get("model"),
+                                 "rawUsageCostTotal": total, "provenance": provenance})
+    totals["catalogEstimatedCost"] = estimate if not ambiguous_cost and priced_requests == totals["requests"] else None
     totals["providerBilledCost"] = None
+    totals["rawUsageCostTotal"] = raw_cost if raw_cost_requests == totals["requests"] else None
+    totals["costRecords"] = cost_records
     totals["sessionIds"] = session_ids
     return totals
 
@@ -150,6 +168,7 @@ def run_variant(args, repo, remote, base, head, branch, case, topology, output):
 
 
 def run(args):
+    os.umask(0o077)
     corpus = json.loads(CORPUS.read_text())
     args.source = args.source.resolve()
     available = {case["id"] for case in corpus["cases"]}
@@ -158,7 +177,7 @@ def run(args):
     if not (args.agent_template / "models.json").exists() and not (args.agent_template / "auth.json").exists():
         raise FileNotFoundError("agent template needs models.json or auth.json for the selected provider")
     args.output = args.output.resolve()
-    args.output.mkdir(parents=True, exist_ok=False)
+    args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     shutil.copyfile(CORPUS, args.output / "corpus.json")
     mapping = {}
     for case in corpus["cases"]:
@@ -190,6 +209,8 @@ def run(args):
                 if any(result["status"] == "completed" and not result.get("evidenceSha256")
                        for result in results):
                     raise RuntimeError(f"{case['id']} repetition {repetition}: completed review lacks evidence")
+                if any(result["status"] == "completed" for result in results) and not all(hashes):
+                    raise RuntimeError(f"{case['id']} repetition {repetition}: shared evidence unavailable for comparison: {hashes}")
                 if all(hashes) and hashes[0] != hashes[1]:
                     raise RuntimeError(f"{case['id']} repetition {repetition}: shared evidence bytes differ: {hashes}")
                 for result in results:
@@ -205,6 +226,7 @@ def run(args):
 
 
 def score(args):
+    os.umask(0o077)
     output = args.output.resolve()
     corpus = {case["id"]: case for case in json.loads((output / "corpus.json").read_text())["cases"]}
     mapping = json.loads((output / "blinded.json").read_text())
@@ -254,16 +276,18 @@ def score(args):
             "catalogEstimatedCost": sum(row["usage"]["catalogEstimatedCost"] for row in group)
             if all(row["usage"]["catalogEstimatedCost"] is not None for row in group) else None,
             "providerBilledCost": None,
+            "rawUsageCostTotal": sum(row["usage"]["rawUsageCostTotal"] for row in group)
+            if all(row["usage"].get("rawUsageCostTotal") is not None for row in group) else None,
         }
     (output / "comparison.json").write_text(json.dumps({
         "quality": {name: {key: value for key, value in values.items()
                             if key not in ("requests", "input", "cacheRead", "cacheWrite",
-                                           "output", "elapsedSeconds", "catalogEstimatedCost", "providerBilledCost")}
+                                           "output", "elapsedSeconds", "catalogEstimatedCost", "providerBilledCost", "rawUsageCostTotal")}
                     for name, values in summary.items()},
         "perRange": rows,
         "usage": {name: {key: value for key, value in values.items()
                           if key in ("requests", "input", "cacheRead", "cacheWrite", "output",
-                                     "elapsedSeconds", "catalogEstimatedCost", "providerBilledCost")}
+                                     "elapsedSeconds", "catalogEstimatedCost", "providerBilledCost", "rawUsageCostTotal")}
                   for name, values in summary.items()},
         "decision": "undetermined; inspect serious recall, false positives, failures, then cost",
     }, indent=2) + "\n")

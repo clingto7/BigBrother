@@ -636,6 +636,36 @@ fn monitoring_delivers_one_range_with_every_commit_without_a_review_status() {
 }
 
 #[test]
+fn monitoring_with_only_github_status_reports_unsupported_channel_without_advancing() {
+    let fixture = fixture("repo-monitor-github-only");
+    let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    set_intensity(&fixture, "monitoringOnly");
+    let before = fixture.store.load().unwrap().branches[&branch]
+        .cursor
+        .clone();
+    commit_change(&fixture.repo, "changed\n", "monitor this change");
+    let (github_url, github_requests) = spawn_github_mock();
+    let output = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
+        .arg("observer")
+        .arg("--socket")
+        .arg(&fixture.socket)
+        .arg("--agent-dir")
+        .arg(&fixture.agent_dir)
+        .arg("--once")
+        .env("BIG_BROTHER_GITHUB_TOKEN", "gh-e2e-token")
+        .env("BIG_BROTHER_GITHUB_API_URL", github_url)
+        .env_remove("BARK_KEY")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("monitoringOnly requires BARK_KEY"));
+    let state = fixture.store.load().unwrap();
+    assert_eq!(state.branches[&branch].cursor, before);
+    assert!(state.branches[&branch].monitoring.is_empty());
+    assert!(github_requests.lock().unwrap().is_empty());
+}
+
+#[test]
 fn admitted_intensity_controls_cumulative_layers_despite_later_profile_edits() {
     for (name, intensity, expected) in [
         ("requirements", "requirements", vec!["requirements"]),
@@ -761,6 +791,38 @@ fn ocr_failure_is_recorded_without_removing_changed_documents_from_review() {
         "{rendered}"
     );
     assert!(rendered.contains("evidence:"), "{rendered}");
+}
+
+#[test]
+fn hanging_ocr_does_not_strand_observation() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = fixture("ocr-hang");
+    let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let base = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let head = commit_change(&fixture.repo, "changed\n", "change with hanging OCR");
+    let bin = fixture.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let ocr = bin.join("ocr");
+    std::fs::write(&ocr, "#!/bin/sh\nsleep 600\n").unwrap();
+    std::fs::set_permissions(&ocr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let env = [("PATH", path.as_str())];
+    let started = Instant::now();
+    let record = wait_until(Duration::from_secs(120), || {
+        observer_once(&fixture.socket, &fixture.agent_dir, &env);
+        fixture.store.records(&branch).unwrap().into_iter().next()
+    });
+    assert!(started.elapsed() < Duration::from_secs(90));
+    assert_eq!(record.layers.len(), 3);
+    let evidence: Value = serde_json::from_slice(
+        &std::fs::read(fixture.store.evidence_path(&branch, &base, &head)).unwrap(),
+    )
+    .unwrap();
+    assert!(evidence["ocr"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("timed out"));
 }
 
 #[test]

@@ -4,6 +4,9 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::process::{Output, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -210,18 +213,18 @@ pub(crate) fn ensure_evidence(
 
 fn ocr_evidence(repo: &Path, base: &str, head: &str) -> OcrEvidence {
     let command = format!("ocr delegate preview --format json --from {base} --to {head}");
-    let preview = Command::new("ocr")
-        .current_dir(repo)
-        .args([
+    let preview = ocr_output(
+        repo,
+        &[
             "delegate", "preview", "--format", "json", "--from", base, "--to", head,
-        ])
-        .output();
+        ],
+    );
     let Ok(preview) = preview else {
         return OcrEvidence {
             command,
             preview: None,
             rules: None,
-            error: Some("OCR executable unavailable".to_string()),
+            error: Some(preview.unwrap_err()),
         };
     };
     if !preview.status.success() {
@@ -254,13 +257,11 @@ fn ocr_evidence(repo: &Path, base: &str, head: &str) -> OcrEvidence {
             error: None,
         };
     }
-    let rules = Command::new("ocr")
-        .current_dir(repo)
-        .args([
-            "delegate", "rule", "--format", "json", "--from", base, "--to", head,
-        ])
-        .args(&paths)
-        .output();
+    let mut args = vec![
+        "delegate", "rule", "--format", "json", "--from", base, "--to", head,
+    ];
+    args.extend(paths);
+    let rules = ocr_output(repo, &args);
     match rules {
         Ok(output) if output.status.success() => match serde_json::from_slice(&output.stdout) {
             Ok(rules) => OcrEvidence {
@@ -286,7 +287,46 @@ fn ocr_evidence(repo: &Path, base: &str, head: &str) -> OcrEvidence {
             command,
             preview: Some(preview),
             rules: None,
-            error: Some(error.to_string()),
+            error: Some(error),
         },
     }
+}
+
+fn ocr_output(repo: &Path, args: &[&str]) -> Result<Output, String> {
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    let mut command = Command::new("ocr");
+    command
+        .current_dir(repo)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    pa_core::platform::process::set_new_process_group(&mut command);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("OCR executable unavailable: {error}"))?;
+    let pid = i32::try_from(child.id()).expect("OS process IDs fit in i32");
+    let (finished, completion) = mpsc::channel();
+    let (output, timed_out) = std::thread::scope(|scope| {
+        let watchdog = scope.spawn(move || match completion.recv_timeout(TIMEOUT) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !pa_core::platform::process::kill_process_group_or_pid(pid) {
+                    eprintln!("big-brother observer: could not kill timed-out OCR process {pid}");
+                }
+                true
+            }
+        });
+        let output = child.wait_with_output();
+        let _ = finished.send(());
+        (output, watchdog.join().expect("OCR watchdog panicked"))
+    });
+    if timed_out {
+        return Err(format!(
+            "OCR {} timed out after {} seconds",
+            args.join(" "),
+            TIMEOUT.as_secs()
+        ));
+    }
+    output.map_err(|error| format!("collecting OCR output: {error}"))
 }

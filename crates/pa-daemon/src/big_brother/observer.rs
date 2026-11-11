@@ -119,6 +119,21 @@ async fn observe_repo(
         return Err(anyhow!("no review profile beside the repository state"));
     };
     let store = RepositoryStateStore::open(&store_agent_dir(repo_dir), &git_root);
+    if !channels.supports_monitoring()
+        && (profile.intensity == ReviewIntensity::MonitoringOnly
+            || state.branches.values().any(|branch| {
+                branch
+                    .in_flight
+                    .as_ref()
+                    .is_some_and(|range| range.intensity == ReviewIntensity::MonitoringOnly)
+                    || branch
+                        .monitoring
+                        .iter()
+                        .any(|notice| !notice.delivery.delivered())
+            }))
+    {
+        anyhow::bail!("monitoringOnly requires BARK_KEY: GitHub Commit Status cannot carry a monitoring notification");
+    }
     // The slug must round-trip: a moved work tree would otherwise write
     // state into a different repository's directory.
     anyhow::ensure!(

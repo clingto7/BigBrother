@@ -191,11 +191,11 @@ impl ReviewProfile {
                 )));
             }
         }
-        for required in ["requirements", "project-fit"] {
-            if self.intensity != ReviewIntensity::Full
-                && self.intensity.includes(required)
-                && self.layer_model(required).is_none()
-            {
+        if self.intensity == ReviewIntensity::Full && self.layer_model("comprehensive").is_some() {
+            return Ok(());
+        }
+        for required in ["requirements", "project-fit", "implementation"] {
+            if self.intensity.includes(required) && self.layer_model(required).is_none() {
                 return Err(invalid(format!("intensity requires the {required} layer")));
             }
         }
@@ -488,6 +488,23 @@ mod tests {
     }
 
     #[test]
+    fn full_intensity_requires_complete_coverage() {
+        let (dir, git_root) = temp_repo();
+        let agent_dir = dir.path().join("agent");
+        for layers in [
+            serde_json::json!([{"name":"requirements","model":"m"}]),
+            serde_json::json!([{"name":"requirements","model":"m"},{"name":"project-fit","model":"m"}]),
+        ] {
+            let body = serde_json::json!({"version":1,"sessionName":"s","intensity":"full","layers":layers});
+            write_profile(&agent_dir, &git_root, &body.to_string());
+            assert!(resolve_profile(&agent_dir, &git_root).is_err());
+        }
+        let body = serde_json::json!({"version":1,"sessionName":"s","intensity":"full","layers":[{"name":"comprehensive","model":"m"}]});
+        write_profile(&agent_dir, &git_root, &body.to_string());
+        assert!(resolve_profile(&agent_dir, &git_root).unwrap().is_some());
+    }
+
+    #[test]
     fn attempt_supervision_defaults_and_overrides() {
         let (dir, git_root) = temp_repo();
         let agent_dir = dir.path().join("agent");
@@ -502,7 +519,7 @@ mod tests {
         assert_eq!(defaults.max_attempts(), 3);
         let body = serde_json::json!({
             "version": 1, "sessionName": "s",
-            "attemptTimeoutSeconds": 5, "maxAttempts": 1,
+            "attemptTimeoutSeconds": 5, "maxAttempts": 1, "intensity": "monitoringOnly",
             "layers": [{ "name": "l", "model": "m" }]
         })
         .to_string();

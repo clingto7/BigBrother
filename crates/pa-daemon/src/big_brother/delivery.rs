@@ -83,6 +83,11 @@ impl DeliveryChannels {
     pub(crate) fn is_empty(&self) -> bool {
         self.bark.is_none() && self.github.is_none()
     }
+
+    /// Monitoring has no Review record, so Commit Status cannot carry its notice.
+    pub(crate) fn supports_monitoring(&self) -> bool {
+        self.bark.is_some()
+    }
 }
 
 /// The advisory Commit Status body (ADR 0012/0029): `success` under the
