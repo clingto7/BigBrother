@@ -24,6 +24,16 @@ python3 evaluation/compare.py run \
   --daemon target/debug/pa-daemon --output /path/to/evaluation-output
 ```
 
+`--model` sets the same provider and model for Prime and every reviewer. To
+evaluate another provider such as a configured DeepSeek model, use its
+actual selector as `--model deepseek/<model-id>` with an agent template that
+already authenticates that provider. Check the model's current availability
+and price before a paid run. Keep the same selector across both variants of
+one comparison; changing provider between variants confounds topology with
+model quality and cost. To limit exposure during a pilot, use `--case
+fetch-supervision --repetitions 1 --run-timeout 180 --attempt-timeout 150
+--max-attempts 1`. A timed out pilot cannot determine finding recall.
+
 The output contains one JSON run record per variant, the immutable evidence,
 final Review records, and full session JSONL for independent inspection.
 Each run records elapsed wall time, request count, raw token buckets, and
