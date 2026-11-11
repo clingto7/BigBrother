@@ -335,6 +335,8 @@ struct RetiredChild {
 }
 
 struct SupervisorChildSessionsInner {
+    /// Review children start outside the watched worktree; its rules are evidence.
+    review_evidence_only: std::sync::atomic::AtomicBool,
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
     parent_active_session_id: String,
@@ -407,6 +409,7 @@ impl SupervisorChildSessions {
     ) -> Self {
         Self {
             inner: Arc::new(SupervisorChildSessionsInner {
+                review_evidence_only: std::sync::atomic::AtomicBool::new(false),
                 link,
                 agent_dir,
                 parent_active_session_id,
@@ -427,6 +430,12 @@ impl SupervisorChildSessions {
                 semantic_edges: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    pub(crate) fn set_review_evidence_only(&self) {
+        self.inner
+            .review_evidence_only
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Wire the delete notification hook (context-tree cache invalidation).
