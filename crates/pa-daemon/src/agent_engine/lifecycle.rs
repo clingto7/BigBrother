@@ -25,6 +25,9 @@ impl AgentSessionEngine {
         &self,
         profile: std::sync::Arc<crate::big_brother::profile::ReviewProfile>,
     ) {
+        if let Some(children) = &self.children {
+            children.set_review_evidence_only();
+        }
         *self.review_profile.write().expect("review profile lock") = Some(profile);
     }
 }

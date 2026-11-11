@@ -32,7 +32,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -89,6 +89,7 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
 fn serve_review(
     mut stream: TcpStream,
     project_fit_calls: &AtomicUsize,
+    requests: &Mutex<Vec<Value>>,
     behavior: ReviewMockBehavior,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -108,6 +109,10 @@ fn serve_review(
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;
     let request: Value = serde_json::from_slice(&body).map_err(std::io::Error::other)?;
+    requests
+        .lock()
+        .expect("provider requests lock")
+        .push(request.clone());
     let model = request["model"].as_str().unwrap_or_default();
     // Verdicts read the MESSAGES, never the serialized request: a
     // message row repeats its text into preview fields, so counting on
@@ -258,7 +263,7 @@ fn serve_review(
     )
 }
 
-fn spawn_review_mock(behavior: ReviewMockBehavior) -> (PathBuf, Arc<AtomicUsize>) {
+fn spawn_review_mock(behavior: ReviewMockBehavior) -> (PathBuf, Arc<Mutex<Vec<Value>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
         "http://127.0.0.1:{}/v1",
@@ -266,16 +271,19 @@ fn spawn_review_mock(behavior: ReviewMockBehavior) -> (PathBuf, Arc<AtomicUsize>
     );
     let calls = Arc::new(AtomicUsize::new(0));
     let project_fit_calls = Arc::clone(&calls);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded_requests = Arc::clone(&requests);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let calls = Arc::clone(&project_fit_calls);
+            let requests = Arc::clone(&recorded_requests);
             std::thread::spawn(move || {
-                let _ = serve_review(stream, &calls, behavior);
+                let _ = serve_review(stream, &calls, &requests, behavior);
             });
         }
     });
-    (PathBuf::from(url), calls)
+    (PathBuf::from(url), requests)
 }
 
 /// A provider that refuses every request with a 500: the conductor's
@@ -414,16 +422,29 @@ struct Fixture {
     agent_dir: PathBuf,
     socket: PathBuf,
     store: RepositoryStateStore,
+    provider_requests: Arc<Mutex<Vec<Value>>>,
 }
 
 fn fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
-    let url = spawn_review_mock(ReviewMockBehavior::StallThenReply).0;
-    fixture_with(repo_dir_name, max_attempts, &url, ATTEMPT_TIMEOUT_SECONDS)
+    let (url, requests) = spawn_review_mock(ReviewMockBehavior::StallThenReply);
+    fixture_with(
+        repo_dir_name,
+        max_attempts,
+        &url,
+        ATTEMPT_TIMEOUT_SECONDS,
+        requests,
+    )
 }
 
 fn runtime_failure_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
-    let url = spawn_review_mock(ReviewMockBehavior::RuntimeMissingThenReply).0;
-    fixture_with(repo_dir_name, max_attempts, &url, ATTEMPT_TIMEOUT_SECONDS)
+    let (url, requests) = spawn_review_mock(ReviewMockBehavior::RuntimeMissingThenReply);
+    fixture_with(
+        repo_dir_name,
+        max_attempts,
+        &url,
+        ATTEMPT_TIMEOUT_SECONDS,
+        requests,
+    )
 }
 
 /// A dead-provider fixture whose attempt budget is unreachable inside any
@@ -431,7 +452,13 @@ fn runtime_failure_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
 /// through the dead-turn fast lane, never the timeout.
 fn dead_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
     let url = spawn_dead_review_mock();
-    fixture_with(repo_dir_name, max_attempts, &url, 1800)
+    fixture_with(
+        repo_dir_name,
+        max_attempts,
+        &url,
+        1800,
+        Arc::new(Mutex::new(Vec::new())),
+    )
 }
 
 fn fixture_with(
@@ -439,6 +466,7 @@ fn fixture_with(
     max_attempts: u32,
     url: &Path,
     attempt_timeout_seconds: u32,
+    provider_requests: Arc<Mutex<Vec<Value>>>,
 ) -> Fixture {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let repo = dir.path().join(repo_dir_name);
@@ -514,6 +542,7 @@ fn fixture_with(
         agent_dir,
         socket,
         store,
+        provider_requests,
     }
 }
 
@@ -625,6 +654,23 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
     // synthesis unwrapped after the marker line (ADR 0030).
     assert_eq!(records[0].attempts, 2);
     assert_eq!(records[0].layers.len(), 3);
+    let requests = fixture.provider_requests.lock().expect("provider requests");
+    for model in ["requirements", "project-fit", "implementation"] {
+        let reviewer_requests: Vec<_> = requests
+            .iter()
+            .filter(|request| request["model"] == model)
+            .collect();
+        assert!(
+            reviewer_requests.len() >= 2,
+            "{model} did not receive both review attempts"
+        );
+        for request in reviewer_requests {
+            assert!(
+                request["messages"].to_string().contains(&evidence_id),
+                "{model} received a different evidence identity"
+            );
+        }
+    }
     assert_eq!(
         records[0].conclusion.as_deref(),
         Some("all layers reviewed")
