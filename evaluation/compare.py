@@ -152,6 +152,9 @@ def run_variant(args, repo, remote, base, head, branch, case, topology, output):
 def run(args):
     corpus = json.loads(CORPUS.read_text())
     args.source = args.source.resolve()
+    available = {case["id"] for case in corpus["cases"]}
+    if args.cases and not set(args.cases) <= available:
+        raise ValueError(f"unknown corpus case(s): {sorted(set(args.cases) - available)}")
     if not (args.agent_template / "models.json").exists() and not (args.agent_template / "auth.json").exists():
         raise FileNotFoundError("agent template needs models.json or auth.json for the selected provider")
     args.output = args.output.resolve()
