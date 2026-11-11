@@ -134,18 +134,7 @@ async fn observe_repo(
             continue;
         };
         if in_flight.intensity == ReviewIntensity::MonitoringOnly {
-            let commits = range_commits(&git_root, &in_flight.base, &in_flight.head)?;
-            let message = format!(
-                "repository: {}\nrange: {}..{}\n{}",
-                git_root.display(),
-                in_flight.base,
-                in_flight.head,
-                commits
-                    .iter()
-                    .map(|(sha, body)| format!("{sha} {body}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
+            let message = monitoring_message(&git_root, &in_flight)?;
             store.complete_monitoring(branch, &in_flight.head, message)?;
             continue;
         }
@@ -215,18 +204,7 @@ async fn observe_repo(
                     range.base
                 );
                 if range.intensity == ReviewIntensity::MonitoringOnly {
-                    let commits = range_commits(&git_root, &range.base, &range.head)?;
-                    let message = format!(
-                        "repository: {}\nrange: {}..{}\n{}",
-                        git_root.display(),
-                        range.base,
-                        range.head,
-                        commits
-                            .iter()
-                            .map(|(sha, body)| format!("{sha} {body}"))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
+                    let message = monitoring_message(&git_root, &range)?;
                     store.complete_monitoring(branch, &head, message)?;
                 } else {
                     let id = ensure_evidence(&store, branch, &range)?;
@@ -259,6 +237,21 @@ async fn observe_repo(
     // in the same one.
     deliver_pending(&store, channels, &git_root).await?;
     Ok(())
+}
+
+fn monitoring_message(git_root: &Path, range: &ReviewRange) -> Result<String> {
+    let commits = range_commits(git_root, &range.base, &range.head)?;
+    Ok(format!(
+        "repository: {}\nrange: {}..{}\n{}",
+        git_root.display(),
+        range.base,
+        range.head,
+        commits
+            .iter()
+            .map(|(sha, body)| format!("{sha} {body}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ))
 }
 
 /// Try to complete the in-flight range: collect the layers' answers from
