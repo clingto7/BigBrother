@@ -151,6 +151,27 @@ pub(crate) async fn deliver_pending(
             )
             .await?;
         }
+        if let Some(config) = &channels.bark {
+            for notice in &state.branches[branch].monitoring {
+                if !retry_due(Some(&notice.delivery), crate::util::now_ms()) {
+                    continue;
+                }
+                let outcome = send_bark_payload(
+                    &http,
+                    config,
+                    json!({
+                        "title": format!("big-brother {repo_name}"),
+                        "body": notice.message,
+                        "group": "big-brother",
+                    }),
+                )
+                .await;
+                let error = outcome.err().map(|error| error.to_string());
+                let delivery =
+                    DeliveryState::advance(Some(&notice.delivery), crate::util::now_iso(), error);
+                store.update_monitoring_delivery(branch, &notice.head, delivery)?;
+            }
+        }
     }
     Ok(())
 }
@@ -268,11 +289,19 @@ async fn send_bark(
     repo_name: &str,
     record: &ReviewRecord,
 ) -> Result<()> {
+    send_bark_payload(http, config, bark_payload(repo_name, record)).await
+}
+
+async fn send_bark_payload(
+    http: &reqwest::Client,
+    config: &BarkConfig,
+    payload: Value,
+) -> Result<()> {
     let url = format!("{}/{}", config.server.trim_end_matches('/'), config.key);
     let response = http
         .post(&url)
         .header("User-Agent", delivery_user_agent())
-        .json(&bark_payload(repo_name, record))
+        .json(&payload)
         .send()
         .await
         .context("POST the bark server")?;
@@ -337,6 +366,8 @@ mod tests {
             branch: "main".to_string(),
             base: BASE.to_string(),
             head: HEAD.to_string(),
+            intensity: crate::big_brother::profile::ReviewIntensity::Full,
+            evidence_id: None,
             attempts: 1,
             completed_at: "2026-10-17T00:00:00.000Z".to_string(),
             layers: Vec::new(),

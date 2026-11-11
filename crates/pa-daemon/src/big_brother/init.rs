@@ -275,6 +275,7 @@ fn build_profile(options: &InitOptions, git_root: &Path) -> Result<ReviewProfile
         }
     }
     Ok(ReviewProfile {
+        intensity: profile::ReviewIntensity::Full,
         version: profile::PROFILE_VERSION,
         session_name,
         main_model: Some(main_model.to_string()),

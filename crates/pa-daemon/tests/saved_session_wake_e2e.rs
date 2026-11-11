@@ -637,6 +637,8 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     // Persist one review record before any delivery (ADR 0021) and advance
     // the cursor through the same product boundary.
     let record = ReviewRecord {
+        intensity: pa_daemon::big_brother::profile::ReviewIntensity::Full,
+        evidence_id: None,
         version: 1,
         branch: branch.clone(),
         base: harvested.base,

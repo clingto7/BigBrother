@@ -1038,6 +1038,8 @@ impl AgentSessionEngine {
                 crate::big_brother::dispatch::dispatch_review_tool(
                     children,
                     std::sync::Arc::clone(review_profile.as_ref().expect("profile present")),
+                    self.config.agent_dir.clone(),
+                    cwd.clone(),
                 )
             })
             .collect::<Vec<_>>();

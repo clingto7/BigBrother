@@ -37,7 +37,7 @@ impl WorktreeSyncError {
 }
 
 /// Run one git command in the work tree and return its trimmed stdout.
-fn git(git_root: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(git_root: &Path, args: &[&str]) -> Result<String> {
     // Bound local commands too: a credential helper, hook, or stalled
     // filesystem must not leave observation waiting indefinitely.
     const TIMEOUT: Duration = Duration::from_secs(90);
@@ -100,6 +100,29 @@ fn git(git_root: &Path, args: &[&str]) -> Result<String> {
 /// The tracked branch's head in the persistent work tree.
 pub(crate) fn branch_head(git_root: &Path, branch: &str) -> Result<String> {
     git(git_root, &["rev-parse", branch])
+}
+
+/// Every commit and its full message in the bounded range, oldest first.
+pub(crate) fn range_commits(
+    git_root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<(String, String)>> {
+    let range = format!("{base}..{head}");
+    let output = git(
+        git_root,
+        &["log", "--reverse", "--format=%H%x00%B%x00", &range],
+    )?;
+    let mut parts = output.split('\0');
+    let mut commits = Vec::new();
+    while let Some(sha) = parts.next() {
+        if sha.trim().is_empty() {
+            break;
+        }
+        let message = parts.next().unwrap_or_default().trim().to_string();
+        commits.push((sha.trim().to_string(), message));
+    }
+    Ok(commits)
 }
 
 /// Resolve the branch to use when enrollment did not name one. The remote's

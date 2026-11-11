@@ -595,6 +595,13 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
     // the next scan cancel the attempt and re-arm the range as attempt 2,
     // whose fresh dispatch completes.
     observe_until_admitted(&fixture);
+    let evidence_id = fixture.store.load().unwrap().branches[&branch]
+        .in_flight
+        .as_ref()
+        .unwrap()
+        .evidence_id
+        .clone()
+        .expect("evidence identity");
     std::thread::sleep(Duration::from_secs(5));
     age_out_attempt(&fixture);
     // The retry's cold-wake chain (worker spawn, dispatch turn, child
@@ -609,6 +616,11 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].base, base);
     assert_eq!(records[0].head, head);
+    assert_eq!(
+        records[0].evidence_id.as_deref(),
+        Some(evidence_id.as_str())
+    );
+    assert!(fixture.store.evidence_path(&branch, &base, &head).exists());
     // The record carries the attempt count the review consumed, and the
     // synthesis unwrapped after the marker line (ADR 0030).
     assert_eq!(records[0].attempts, 2);

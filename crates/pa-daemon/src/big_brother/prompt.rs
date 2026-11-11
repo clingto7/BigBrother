@@ -20,12 +20,13 @@ pub(crate) fn conductor_system_prompt(profile: &ReviewProfile) -> String {
 The background observer sends exactly one message per admitted review \
 range, shaped \"REVIEW_RANGE <baseSha>..<headSha> END\".
 
-Dispatch the range: for each configured review layer ({layers}), call \
-dispatch_review exactly once with the range's baseSha and headSha. The \
+Dispatch the range: the observer's wake message names the selected \
+cumulative review layers from ({layers}); call dispatch_review exactly once \
+for each selected layer with the range's baseSha and headSha. The \
 reviewers run after your turn settles; each one's reply arrives as a child \
 message on a later turn.
 
-Once every layer has replied, write the range's synthesis: summarize each \
+Once every selected layer has replied, write the range's synthesis: summarize each \
 layer's findings, keep hard violations separate from advisory \
 observations, and state one overall conclusion for the range.
 
