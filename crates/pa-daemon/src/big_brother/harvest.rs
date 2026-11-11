@@ -174,8 +174,8 @@ pub fn harvest_review(
         }
     }
     let conclusion = match (last_text, last_activity_index) {
-        (Some((index, text)), Some(activity)) if index > activity => Some(unwrap_synthesis(&text)),
-        (Some((_, text)), None) => Some(unwrap_synthesis(&text)),
+        (Some((index, text)), Some(activity)) if index > activity => extract_synthesis(&text),
+        (Some((_, text)), None) => extract_synthesis(&text),
         _ => None,
     };
 
@@ -302,12 +302,10 @@ fn child_reply(row: &Value) -> Option<(String, String, String)> {
     Some((layer.to_string(), head.to_string(), body))
 }
 
-/// The synthesis after the marker line (the conductor prompt's output
-/// contract, ADR 0030): everything after the LAST marker line, trimmed.
-/// A text without the marker — a pre-contract conversation, or a model
-/// that ignored it — is kept whole; so is one whose after-marker body
-/// came out empty.
-fn unwrap_synthesis(text: &str) -> String {
+/// The synthesis after the required marker line (the conductor prompt's
+/// output contract, ADR 0030): everything after the LAST marker line,
+/// trimmed. Dispatch acknowledgements and empty syntheses are not reviews.
+fn extract_synthesis(text: &str) -> Option<String> {
     let mut cut = None;
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
@@ -316,12 +314,9 @@ fn unwrap_synthesis(text: &str) -> String {
         }
         offset += line.len();
     }
-    let body = cut.map_or("", |at| text[at..].trim());
-    if body.is_empty() {
-        text.to_string()
-    } else {
-        body.to_string()
-    }
+    let start = cut?;
+    let body = text.get(start..)?.trim();
+    (!body.is_empty()).then(|| body.to_string())
 }
 
 /// A message row's text content: text blocks joined with newlines (a bare
@@ -373,7 +368,7 @@ mod tests {
             { "role": "custom", "content": "[child] requirements replied" },
             { "role": "custom", "content": "[child] project-fit replied" },
             { "role": "custom", "content": "[child] implementation replied" },
-            { "role": "assistant", "content": [{ "type": "text", "text": "clean overall" }] }
+            { "role": "assistant", "content": [{ "type": "text", "text": "REVIEW_SYNTHESIS\nclean overall" }] }
         ]})
     }
 
@@ -666,8 +661,8 @@ mod tests {
         }]);
         let harvested = harvest_review(&transcript, &complete_answers()).unwrap();
         assert_eq!(harvested.conclusion, "## Range synthesis — clean overall");
-        // Without the marker (a pre-contract conversation), the whole
-        // text stays — and so does one whose after-marker body is empty.
+        // A dispatch acknowledgement is not a completed review. Only a
+        // nonempty body after the required marker can complete the range.
         let mut unmarked = complete_transcript();
         unmarked["messages"]
             .as_array_mut()
@@ -677,12 +672,10 @@ mod tests {
             "type": "text",
             "text": "narration only, no marker"
         }]);
-        assert_eq!(
-            harvest_review(&unmarked, &complete_answers())
-                .unwrap()
-                .conclusion,
-            "narration only, no marker"
-        );
+        assert!(matches!(
+            harvest_review(&unmarked, &complete_answers()),
+            Err(HarvestError::NoConclusion)
+        ));
         let mut empty_after = complete_transcript();
         empty_after["messages"]
             .as_array_mut()
@@ -692,11 +685,9 @@ mod tests {
             "type": "text",
             "text": "narration\n\nREVIEW_SYNTHESIS\n"
         }]);
-        assert_eq!(
-            harvest_review(&empty_after, &complete_answers())
-                .unwrap()
-                .conclusion,
-            "narration\n\nREVIEW_SYNTHESIS\n"
-        );
+        assert!(matches!(
+            harvest_review(&empty_after, &complete_answers()),
+            Err(HarvestError::NoConclusion)
+        ));
     }
 }

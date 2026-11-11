@@ -352,7 +352,7 @@ async fn try_complete_review(
         };
         let child_id = session_id(child)?;
         let messages = client.get_messages(&child_id).await?;
-        if let Some(answer) = last_assistant_text(&messages) {
+        if let Some(answer) = settled_child_answer(child, &messages) {
             answers.insert(layer.name.clone(), answer);
             child_ids.insert(layer.name.clone(), child_id);
         }
@@ -480,6 +480,13 @@ async fn try_complete_review(
         in_flight.base, in_flight.head
     );
     Ok(true)
+}
+
+/// Whether the child roster proves its transcript contains a final answer.
+fn settled_child_answer(child: &Value, messages: &Value) -> Option<String> {
+    let is_terminal = child.get("status").and_then(Value::as_str) == Some("completed")
+        || child.get("isSessionActive").and_then(Value::as_bool) == Some(false);
+    is_terminal.then(|| last_assistant_text(messages)).flatten()
 }
 
 /// Missing layers become terminal only when the conductor reported a
@@ -777,6 +784,26 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn an_active_childs_progress_text_is_not_a_review_answer() {
+        let messages = json!({"messages": [
+            {"role": "assistant", "content": [{"type": "text", "text": "I'll start by reading evidence."}]}
+        ]});
+        assert_eq!(
+            settled_child_answer(&json!({"status": "running"}), &messages),
+            None
+        );
+        assert_eq!(
+            settled_child_answer(&json!({"status": "completed"}), &messages).as_deref(),
+            Some("I'll start by reading evidence.")
+        );
+        assert_eq!(
+            settled_child_answer(&json!({"isSessionActive": false}), &messages).as_deref(),
+            Some("I'll start by reading evidence.")
+        );
+        assert_eq!(settled_child_answer(&json!({}), &messages), None);
+    }
 
     #[test]
     fn only_an_absent_child_with_an_exact_no_reply_notice_is_terminal() {
