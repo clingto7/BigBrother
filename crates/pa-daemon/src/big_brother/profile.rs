@@ -25,8 +25,8 @@ pub struct ReviewProfile {
     /// this field matters at creation time (enrollment/init).
     #[serde(default)]
     pub main_model: Option<String>,
-    /// The review layers (ADR 0019): each a distinct child-agent role
-    /// with its own model, dispatched per review range.
+    /// One comprehensive reviewer configuration. Legacy profiles with
+    /// named coverage layers remain readable during migration.
     pub layers: Vec<ReviewLayer>,
     /// Cumulative coverage selected for newly admitted ranges.
     #[serde(default)]
@@ -60,8 +60,10 @@ impl ReviewIntensity {
     pub fn includes(self, layer: &str) -> bool {
         match self {
             Self::MonitoringOnly => false,
-            Self::Requirements => layer == "requirements",
-            Self::RequirementsAndProjectFit => layer == "requirements" || layer == "project-fit",
+            Self::Requirements => layer == "requirements" || layer == "comprehensive",
+            Self::RequirementsAndProjectFit => {
+                layer == "requirements" || layer == "project-fit" || layer == "comprehensive"
+            }
             Self::Full => true,
         }
     }
@@ -122,6 +124,14 @@ impl ReviewProfile {
             .iter()
             .find(|candidate| candidate.name == layer)
             .map(|candidate| candidate.model.as_str())
+    }
+
+    /// Resolve one reviewer model from a current or legacy profile.
+    #[must_use]
+    pub fn reviewer_model(&self) -> Option<&str> {
+        self.layer_model("comprehensive")
+            .or(self.main_model.as_deref())
+            .or_else(|| self.layers.first().map(|layer| layer.model.as_str()))
     }
 
     /// One attempt's total time budget (ADR 0028).
@@ -191,7 +201,9 @@ impl ReviewProfile {
                 )));
             }
         }
-        if self.intensity == ReviewIntensity::Full && self.layer_model("comprehensive").is_some() {
+        if self.intensity != ReviewIntensity::MonitoringOnly
+            && self.layer_model("comprehensive").is_some()
+        {
             return Ok(());
         }
         for required in ["requirements", "project-fit", "implementation"] {
@@ -401,6 +413,7 @@ mod tests {
             profile.layer_model("project-fit"),
             Some("prime-inference/project-fit")
         );
+        assert_eq!(profile.reviewer_model(), Some("prime-inference/main"));
         assert_eq!(profile.layer_model("unknown"), None);
     }
 
@@ -502,6 +515,26 @@ mod tests {
         let body = serde_json::json!({"version":1,"sessionName":"s","intensity":"full","layers":[{"name":"comprehensive","model":"m"}]});
         write_profile(&agent_dir, &git_root, &body.to_string());
         assert!(resolve_profile(&agent_dir, &git_root).unwrap().is_some());
+    }
+
+    #[test]
+    fn one_comprehensive_reviewer_is_valid_for_every_review_intensity() {
+        let (dir, git_root) = temp_repo();
+        let agent_dir = dir.path().join("agent");
+        for intensity in ["requirements", "requirementsAndProjectFit", "full"] {
+            let body = serde_json::json!({
+                "version": 1,
+                "sessionName": "s",
+                "intensity": intensity,
+                "layers": [{"name": "comprehensive", "model": "m"}]
+            });
+            write_profile(&agent_dir, &git_root, &body.to_string());
+            let profile = resolve_profile(&agent_dir, &git_root)
+                .unwrap()
+                .expect("single reviewer profile loads");
+            assert_eq!(profile.reviewer_model(), Some("m"));
+            assert!(profile.intensity.includes("comprehensive"));
+        }
     }
 
     #[test]

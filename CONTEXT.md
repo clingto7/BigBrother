@@ -86,11 +86,11 @@ A bounded change from the last completed revision to an observed branch head.
 When review is enabled it receives one overall review synthesis. Individual
 pushed commits remain identifiable within the range.
 
-### Review layer
+### Review coverage area
 
-A distinct level of assessment within a Review range, progressing from
-verifiable requirements through project fit to implementation quality. A
-layer's reviewer supplies evidence and proposals for the final synthesis.
+One of three concerns in a Review: verifiable requirements, project fit, and
+implementation quality. One reviewer assesses all areas selected by the
+Review intensity and provides evidence for the conductor's final synthesis.
 
 ### Review scope
 
@@ -101,9 +101,9 @@ and implementation quality, with conclusions tied to evidence.
 ### Review intensity
 
 The repository's configured cumulative coverage for a Review range: no review,
-verifiable requirements, requirements plus project fit, or all three Review
-layers including implementation quality. It is fixed when a range is admitted.
-It does not set the execution budget.
+verifiable requirements, requirements plus project fit, or all three coverage
+areas. It is fixed when a range is admitted. It does not set the execution
+budget or reviewer count.
 
 ### Monitoring-only mode
 
@@ -114,8 +114,8 @@ asserting an assessment of that range.
 ### Review profile
 
 Big Brother's per-repository configuration for review: the stable wake
-name of the repository's main review session, its creation model, and the
-layer-to-model assignments. It is operator-owned, stored under Big
+name of the repository's main review session, its creation model, and one
+comprehensive reviewer model. It is operator-owned, stored under Big
 Brother's agent-side state keyed by the repository's local git root, and
 never inside the watched work tree, so reviewed content cannot edit the
 reviewer's operating rules.

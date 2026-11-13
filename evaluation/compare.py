@@ -168,6 +168,10 @@ def run_variant(args, repo, remote, base, head, branch, case, topology, output):
 
 
 def run(args):
+    raise SystemExit(
+        "paired topology replay is archived: ADR 0032 selects one reviewer, "
+        "so this historical layered-vs-single runner cannot produce a valid comparison"
+    )
     os.umask(0o077)
     corpus = json.loads(CORPUS.read_text())
     args.source = args.source.resolve()

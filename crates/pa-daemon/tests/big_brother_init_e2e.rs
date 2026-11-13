@@ -111,12 +111,11 @@ fn serve_review(mut stream: TcpStream) -> std::io::Result<()> {
     let data = if model == "main" {
         match dispatch_target {
             Some((base, head)) => {
-                let layers: &[&str] =
-                    if request_text.contains("Dispatch only these layers: comprehensive") {
-                        &["comprehensive"]
-                    } else {
-                        &["requirements", "project-fit", "implementation"]
-                    };
+                let layers: &[&str] = if request_text.contains("layer: comprehensive") {
+                    &["comprehensive"]
+                } else {
+                    &["requirements", "project-fit", "implementation"]
+                };
                 let calls: Vec<Value> = layers
                     .iter()
                     .enumerate()
@@ -130,7 +129,8 @@ fn serve_review(mut stream: TcpStream) -> std::io::Result<()> {
                                 "arguments": json!({
                                     "layer": layer,
                                     "baseSha": base,
-                                    "headSha": head
+                                    "headSha": head,
+                                    "reviewBrief": "Check changed files against project rules."
                                 }).to_string()
                             }
                         })
@@ -290,7 +290,6 @@ fn init_options(socket: &Path, agent_dir: &Path, repo: &Path) -> InitOptions {
         branch: None,
         session_name: None,
         main_model: Some("prime-inference/main".to_string()),
-        layers: Vec::new(),
         attempt_timeout_seconds: None,
         max_attempts: None,
     }
@@ -431,12 +430,13 @@ fn init_enrolls_reviews_queries_and_survives_a_restart() {
             .then_some(())
     });
 
-    // The completed record carries every configured layer and a synthesis.
+    // The completed record carries one comprehensive reviewer and synthesis.
     let records = store.records(&branch).expect("records");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].base, base);
     assert_eq!(records[0].head, head);
-    assert_eq!(records[0].layers.len(), 3);
+    assert_eq!(records[0].layers.len(), 1);
+    assert_eq!(records[0].layers[0].layer, "comprehensive");
     // The synthesis is the unwrapped body after the REVIEW_SYNTHESIS
     // marker (ADR 0030) — the turn narration never enters the record.
     assert_eq!(

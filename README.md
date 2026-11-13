@@ -13,7 +13,7 @@ It watches a dedicated Git worktree, fetches the tracked branch, and asks a pers
 Most automated reviewers answer one pull request or one CI job. Big Brother is for a different workflow: keep a review worktree running in the background while you continue using your normal checkout and interactive agent sessions.
 
 - **Persistent review context** — one repository-scoped review session carries project policy, direction, and prior review state across ranges.
-- **Layered review** — requirements, project fit, and implementation quality can use separate review layers and models.
+- **Configurable review coverage** — one reviewer covers verifiable requirements, project fit, and implementation quality according to selected intensity.
 - **Local control** — the observer, state, worktree, and service lifecycle live on your machine; you bring the model endpoint and Git credentials.
 - **Read-only boundary** — the review agent can inspect and reason about the repository, but the service does not modify project code.
 - **Durable delivery** — completed records can publish an advisory GitHub Commit Status (`big-brother/review`) and optional Bark notifications.
@@ -116,10 +116,7 @@ Make sure the worktree is clean, then enroll it. `--branch` is optional; without
 ```bash
 big-brother init \
   --repo "$HOME/review-worktrees/REPOSITORY" \
-  --main-model provider/model \
-  --layer requirements=provider/model \
-  --layer project-fit=provider/model \
-  --layer implementation=provider/model
+  --main-model provider/model
 ```
 
 `big-brother init` accepts:
@@ -131,14 +128,13 @@ big-brother init \
 | `--socket PATH` | The daemon's Unix socket (default: the standard daemon socket) |
 | `--branch NAME` | The tracked branch (default: `origin/HEAD`, then `main`, then `master`) |
 | `--session-name NAME` | The conductor's wake name (default: `review-<repo>`; pass one when the default collides with an existing session) |
-| `--main-model provider/model` | The conductor session's model |
-| `--layer name=provider/model` | A review layer's model (repeatable) |
+| `--main-model provider/model` | The conductor and reviewer model for a new profile |
 | `--attempt-timeout-secs N` | One attempt's time budget (default: 1800) |
 | `--max-attempts N` | The attempt ceiling per range (default: 3; at the ceiling the range fails loudly and the cursor holds) |
 
 `big-brother status` accepts `--repo` and `--agent-dir` with the same meanings. Both commands print their full flag surface with `--help`, and `--version` reports the shipped version.
 
-The model and layer flags shape the review profile written at first enrollment; on a later `init` the existing profile wins and the flags are ignored. To change models afterwards, edit the profile file `init` prints (`~/.prime/agent/big-brother/repos/<repo>/profile.json`) — same JSON keys, camelCase.
+The model flag shapes the profile written at first enrollment; on a later `init` the existing profile wins and the flag is ignored. To change models afterwards, edit the profile file `init` prints (`~/.prime/agent/big-brother/repos/<repo>/profile.json`) — same JSON keys, camelCase. Legacy per-layer profiles remain readable; new profiles use one `comprehensive` reviewer.
 
 The existing Prime Agent daemon must be running before `init`. If you manage it manually, use the same agent directory and socket for both processes:
 
@@ -189,7 +185,7 @@ On each interval, the observer:
 2. fast-forwards the dedicated local branch and worktree;
 3. admits the new range after the previous range settles;
 4. wakes the repository's persistent review session;
-5. harvests the layered answers and synthesis;
+5. harvests the reviewer's answer and conductor synthesis;
 6. stores the review record before attempting delivery.
 
 The default interval is 30 seconds. A dirty worktree, fetch failure, wrong checked-out branch, or non-fast-forward update is recorded and skipped without overwriting files. A repository with no fetch upstream remains usable in local-observation mode.

@@ -35,8 +35,7 @@ async fn run() -> Result<()> {
             println!("  --socket PATH                   The daemon's Unix socket");
             println!("  --branch NAME                   The tracked branch (default: origin/HEAD, then main, master)");
             println!("  --session-name NAME             The conductor's wake name (default: review-<repo>)");
-            println!("  --main-model PROVIDER/MODEL     The conductor's model");
-            println!("  --layer NAME=PROVIDER/MODEL     A review layer's model (repeatable)");
+            println!("  --main-model PROVIDER/MODEL     The conductor and reviewer model");
             println!("  --attempt-timeout-secs N        One attempt's time budget (default: 1800)");
             println!(
                 "  --max-attempts N                The attempt ceiling per range (default: 3)"
@@ -69,7 +68,6 @@ async fn init_command(mut args: std::iter::Skip<std::env::Args>) -> Result<()> {
     let mut branch = None;
     let mut session_name = None;
     let mut main_model = None;
-    let mut layers = Vec::new();
     let mut attempt_timeout_seconds = None;
     let mut max_attempts = None;
     let next_value = |flag: &str, args: &mut std::iter::Skip<std::env::Args>| -> Result<String> {
@@ -95,13 +93,6 @@ async fn init_command(mut args: std::iter::Skip<std::env::Args>) -> Result<()> {
             "--max-attempts" => {
                 max_attempts = Some(next_u32("max-attempts", &mut args)?);
             }
-            "--layer" => {
-                let value = next_value("layer", &mut args)?;
-                let (name, model) = value
-                    .split_once('=')
-                    .ok_or_else(|| anyhow!("--layer expects name=model, got {value}"))?;
-                layers.push((name.to_string(), model.to_string()));
-            }
             other => bail!("unknown init option: {other}"),
         }
     }
@@ -115,7 +106,6 @@ async fn init_command(mut args: std::iter::Skip<std::env::Args>) -> Result<()> {
         branch,
         session_name,
         main_model,
-        layers,
         attempt_timeout_seconds,
         max_attempts,
     };

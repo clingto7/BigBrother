@@ -198,9 +198,8 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
 }
 
 /// The review provider mock (the known-good shape from the sibling
-/// e2e's): the conductor (model `main`) dispatches the three layers for
-/// a range it has not yet dispatched, answers text otherwise; every
-/// layer model answers once.
+/// e2e's): the conductor (model `main`) dispatches one comprehensive
+/// reviewer for each new range; that reviewer answers once.
 fn serve_review(mut stream: TcpStream, requests: &Mutex<Vec<Value>>) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut content_length = 0usize;
@@ -238,36 +237,31 @@ fn serve_review(mut stream: TcpStream, requests: &Mutex<Vec<Value>>) -> std::io:
         }
         Some((base.to_string(), head.to_string()))
     }();
-    let data = if model == "main" {
+    let data = if model == "main" && request_text.contains("Conductor-prepared review brief") {
+        vec![
+            chunk(
+                &json!({"role": "assistant", "content": "comprehensive reviewed"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ]
+    } else if model == "main" {
         match dispatch_target {
             Some((base, head)) => {
-                let selected = request_text
-                    .rsplit_once("Dispatch only these layers: ")
-                    .and_then(|(_, suffix)| suffix.split_once('.'))
-                    .map_or(
-                        "requirements, project-fit, implementation",
-                        |(layers, _)| layers,
-                    );
-                let layers: Vec<&str> = selected.split(", ").collect();
-                let calls: Vec<Value> = layers
-                    .iter()
-                    .enumerate()
-                    .map(|(index, layer)| {
-                        json!({
-                            "index": index,
-                            "id": format!("call-review-{index}-{head}"),
-                            "type": "function",
-                            "function": {
-                                "name": "dispatch_review",
-                                "arguments": json!({
-                                    "layer": layer,
-                                    "baseSha": base,
-                                    "headSha": head
-                                }).to_string()
-                            }
-                        })
-                    })
-                    .collect();
+                let calls = vec![json!({
+                    "index": 0,
+                    "id": format!("call-review-{head}"),
+                    "type": "function",
+                    "function": {
+                        "name": "dispatch_review",
+                        "arguments": json!({
+                            "layer": "comprehensive",
+                            "baseSha": base,
+                            "headSha": head,
+                            "reviewBrief": "Check changed areas against project rules and requirements."
+                        }).to_string()
+                    }
+                })];
                 vec![
                     chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
                     chunk(&json!({}), Some("tool_calls")),
@@ -494,23 +488,6 @@ fn fixture(repo_dir_name: &str) -> Fixture {
             branch: None,
             session_name: None,
             main_model: Some("prime-inference/main".to_string()),
-            // Distinct layer models: the mock scripts the layers BY MODEL
-            // ID, and init's default would run every layer on the main
-            // model.
-            layers: vec![
-                (
-                    "requirements".to_string(),
-                    "prime-inference/requirements".to_string(),
-                ),
-                (
-                    "project-fit".to_string(),
-                    "prime-inference/project-fit".to_string(),
-                ),
-                (
-                    "implementation".to_string(),
-                    "prime-inference/implementation".to_string(),
-                ),
-            ],
             attempt_timeout_seconds: None,
             max_attempts: None,
         }))
@@ -666,14 +643,10 @@ fn monitoring_with_only_github_status_reports_unsupported_channel_without_advanc
 }
 
 #[test]
-fn admitted_intensity_controls_cumulative_layers_despite_later_profile_edits() {
-    for (name, intensity, expected) in [
-        ("requirements", "requirements", vec!["requirements"]),
-        (
-            "project-fit",
-            "requirementsAndProjectFit",
-            vec!["requirements", "project-fit"],
-        ),
+fn admitted_intensity_controls_single_reviewer_coverage_despite_later_profile_edits() {
+    for (name, intensity) in [
+        ("requirements", "requirements"),
+        ("project-fit", "requirementsAndProjectFit"),
     ] {
         let fixture = fixture(name);
         let branch = git(&fixture.repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -696,12 +669,12 @@ fn admitted_intensity_controls_cumulative_layers_despite_later_profile_edits() {
         });
         assert_eq!(record.intensity, admitted.intensity);
         assert_eq!(record.evidence_id, admitted.evidence_id);
-        let layers: Vec<_> = record
+        let reviewers: Vec<_> = record
             .layers
             .iter()
             .map(|layer| layer.layer.as_str())
             .collect();
-        assert_eq!(layers, expected);
+        assert_eq!(reviewers, ["comprehensive"]);
     }
 }
 
@@ -767,7 +740,7 @@ fn ocr_failure_is_recorded_without_removing_changed_documents_from_review() {
         observer_once(&fixture.socket, &fixture.agent_dir, &env);
         fixture.store.records(&branch).unwrap().into_iter().next()
     });
-    assert_eq!(record.layers.len(), 3);
+    assert_eq!(record.layers.len(), 1);
     let evidence: Value = serde_json::from_slice(
         &std::fs::read(fixture.store.evidence_path(&branch, &base, &head)).unwrap(),
     )
@@ -814,7 +787,7 @@ fn hanging_ocr_does_not_strand_observation() {
         fixture.store.records(&branch).unwrap().into_iter().next()
     });
     assert!(started.elapsed() < Duration::from_secs(90));
-    assert_eq!(record.layers.len(), 3);
+    assert_eq!(record.layers.len(), 1);
     let evidence: Value = serde_json::from_slice(
         &std::fs::read(fixture.store.evidence_path(&branch, &base, &head)).unwrap(),
     )
@@ -854,7 +827,7 @@ fi
         observer_once(&fixture.socket, &fixture.agent_dir, &env);
         fixture.store.records(&branch).unwrap().into_iter().next()
     });
-    assert_eq!(record.layers.len(), 3);
+    assert_eq!(record.layers.len(), 1);
     let evidence: Value = serde_json::from_slice(
         &std::fs::read(fixture.store.evidence_path(&branch, &base, &head)).unwrap(),
     )
@@ -950,21 +923,17 @@ fn completed_records_deliver_to_commit_status_and_bark() {
         }));
     assert!(evidence["ocr"]["preview"].is_object() || evidence["ocr"]["error"].is_string());
     let provider_payloads = fixture.provider_payloads.lock().expect("provider payloads");
-    for model in ["requirements", "project-fit", "implementation"] {
-        let request = provider_payloads
-            .iter()
-            .find(|request| request["model"] == model)
-            .expect("each reviewer receives a request");
-        let messages = request["messages"].to_string();
-        assert!(
-            messages.contains(evidence_id),
-            "{model} lost the shared evidence identity"
-        );
-        assert!(
-            messages.contains("untrusted source material"),
-            "{model} lost the repository-rules trust boundary"
-        );
-    }
+    let reviewer_request = provider_payloads
+        .iter()
+        .find(|request| {
+            request["messages"]
+                .to_string()
+                .contains("Conductor-prepared review brief")
+        })
+        .expect("comprehensive reviewer receives a request");
+    let reviewer_messages = reviewer_request["messages"].to_string();
+    assert!(reviewer_messages.contains(evidence_id));
+    assert!(reviewer_messages.contains("untrusted source material"));
     for request in provider_payloads.iter() {
         let model = request["model"].as_str().unwrap_or_default();
         let system_messages = request["messages"]
