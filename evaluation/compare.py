@@ -168,10 +168,6 @@ def run_variant(args, repo, remote, base, head, branch, case, topology, output):
 
 
 def run(args):
-    raise SystemExit(
-        "paired topology replay is archived: ADR 0032 selects one reviewer, "
-        "so this historical layered-vs-single runner cannot produce a valid comparison"
-    )
     os.umask(0o077)
     corpus = json.loads(CORPUS.read_text())
     args.source = args.source.resolve()
@@ -319,12 +315,10 @@ def main():
     grade.add_argument("--judgments", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "run":
-        if args.repetitions < 1:
-            parser.error("--repetitions must be positive")
-        args.big_brother = args.big_brother.resolve()
-        args.daemon = args.daemon.resolve()
-        args.agent_template = args.agent_template.resolve()
-        run(args)
+        parser.error(
+            "paired topology replay is archived: ADR 0032 selects one reviewer, "
+            "so this historical layered-vs-single runner cannot produce a valid comparison"
+        )
     else:
         score(args)
 
