@@ -486,7 +486,7 @@ fn a_comprehensive_reviewer_covers_the_full_range_through_the_record() {
     std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions");
     let url = spawn_review_mock();
     let models: Vec<Value> = ["main", "comprehensive"].into_iter().map(|id| json!({
-        "id": id, "name": id, "api": "openai-completions", "contextWindow": 128000, "maxTokens": 4096
+        "id": id, "name": id, "api": "openai-completions", "contextWindow": 128_000, "maxTokens": 4096
     })).collect();
     std::fs::write(agent_dir.join("models.json"), json!({"providers": {"prime-inference": {
         "api": "openai-completions", "baseUrl": url.to_string_lossy(), "apiKey": "sk-review-test",
