@@ -38,6 +38,8 @@ fn enrolled_repository() -> (tempfile::TempDir, PathBuf, PathBuf) {
             branch: "main".to_string(),
             base: range.base,
             head: HEAD.to_string(),
+            intensity: pa_daemon::big_brother::profile::ReviewIntensity::Full,
+            evidence_id: None,
             attempts: 1,
             completed_at: String::new(),
             layers: vec![ReviewRecordLayer {
