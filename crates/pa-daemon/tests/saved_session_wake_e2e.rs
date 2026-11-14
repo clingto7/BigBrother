@@ -185,26 +185,20 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
                 .and_then(|(_, suffix)| suffix.split_once(" END"))
                 .and_then(|(range, _)| range.split_once(".."))
                 .expect("wake request contains fixed range");
-            let layers = ["requirements", "project-fit", "implementation"];
-            let calls: Vec<Value> = layers
-                .iter()
-                .enumerate()
-                .map(|(index, layer)| {
-                    json!({
-                        "index": index,
-                        "id": format!("call-review-{index}-{head}"),
-                        "type": "function",
-                        "function": {
-                            "name": "dispatch_review",
-                            "arguments": json!({
-                                "layer": layer,
-                                "baseSha": base,
-                                "headSha": head
-                            }).to_string()
-                        }
-                    })
-                })
-                .collect();
+            let calls = vec![json!({
+                "index": 0,
+                "id": format!("call-review-{head}"),
+                "type": "function",
+                "function": {
+                    "name": "dispatch_review",
+                    "arguments": json!({
+                        "layer": "comprehensive",
+                        "baseSha": base,
+                        "headSha": head,
+                        "reviewBrief": "Review the changed range against shared project context."
+                    }).to_string()
+                }
+            })];
             vec![
                 chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
                 chunk(&json!({}), Some("tool_calls")),
@@ -214,7 +208,7 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
                 chunk(&json!({"role": "assistant", "content": "ready"}), None),
                 chunk(&json!({}), Some("stop")),
             ]
-        } else {
+        } else if request.to_string().contains("comprehensive reviewed") {
             vec![
                 chunk(
                     &json!({"role": "assistant", "content": "REVIEW_SYNTHESIS\nall layers reviewed"}),
@@ -222,7 +216,38 @@ fn serve_review(mut stream: TcpStream, main_calls: &AtomicUsize) -> std::io::Res
                 ),
                 chunk(&json!({}), Some("stop")),
             ]
+        } else {
+            vec![
+                chunk(
+                    &json!({"role": "assistant", "content": "Waiting for the comprehensive reviewer."}),
+                    None,
+                ),
+                chunk(&json!({}), Some("stop")),
+            ]
         }
+    } else if model == "comprehensive" && request.to_string().contains("call-send-review-result") {
+        vec![
+            chunk(
+                &json!({"role": "assistant", "content": "comprehensive reviewed"}),
+                None,
+            ),
+            chunk(&json!({}), Some("stop")),
+        ]
+    } else if model == "comprehensive" {
+        let code = "from rlm import host_request\nawait host_request(\"agent_message.send\", {\"message\": \"comprehensive reviewed\", \"receiver_role\": \"parent\"})";
+        let calls = vec![json!({
+            "index": 0,
+            "id": "call-send-review-result",
+            "type": "function",
+            "function": {
+                "name": "python_repl",
+                "arguments": json!({"code": code}).to_string()
+            }
+        })];
+        vec![
+            chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
+            chunk(&json!({}), Some("tool_calls")),
+        ]
     } else {
         vec![
             chunk(
@@ -351,6 +376,7 @@ impl Client {
     }
 }
 
+#[track_caller]
 fn wait_until<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + deadline;
     loop {
@@ -394,8 +420,8 @@ fn git(repo: &Path, args: &[&str]) -> String {
         .to_string()
 }
 
-/// Write the repository's review profile (ADR 0024) under the agent dir:
-/// the wake name, the main model, and the three layer models. Stored
+/// Write the repository's review profile under the agent dir: the wake
+/// name, the main model, and one comprehensive reviewer. Stored
 /// outside the work tree on purpose — reviewed content must not edit the
 /// reviewer's operating rules.
 fn write_review_profile(agent_dir: &Path, repo: &Path) {
@@ -408,9 +434,7 @@ fn write_review_profile(agent_dir: &Path, repo: &Path) {
             "sessionName": "review-main",
             "mainModel": "prime-inference/main",
             "layers": [
-                { "name": "requirements", "model": "prime-inference/requirements" },
-                { "name": "project-fit", "model": "prime-inference/project-fit" },
-                { "name": "implementation", "model": "prime-inference/implementation" }
+                { "name": "comprehensive", "model": "prime-inference/comprehensive" }
             ]
         })
         .to_string(),
@@ -419,7 +443,7 @@ fn write_review_profile(agent_dir: &Path, repo: &Path) {
 }
 
 #[test]
-fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children() {
+fn restarted_observer_wakes_restricted_main_and_runs_single_comprehensive_reviewer() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let repo = dir.path().join("repo");
     std::fs::create_dir(&repo).expect("repo");
@@ -434,7 +458,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let main_calls = Arc::new(AtomicUsize::new(0));
     let url = spawn_review_mock(Arc::clone(&main_calls));
-    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
+    let models: Vec<Value> = ["main", "comprehensive"]
         .into_iter()
         .map(|id| {
             json!({
@@ -545,7 +569,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     assert_ne!(woken_id, active_id);
     let parent_messages = wait_until(Duration::from_secs(90), || {
         let text = messages(&mut client, "parent-messages", woken_id);
-        (text.contains("all layers reviewed") && text.matches("dispatch_review").count() >= 3)
+        (text.contains("all layers reviewed") && text.matches("dispatch_review").count() >= 1)
             .then_some(text)
     });
     assert!(
@@ -573,7 +597,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     assert_eq!(woken_model["provider"], "prime-inference");
     assert_eq!(woken_model["id"], "main");
 
-    let layers = ["requirements", "project-fit", "implementation"];
+    let layers = ["comprehensive"];
     let child_summaries = wait_until(Duration::from_secs(90), || {
         client.send_command("children", &json!({ "type": "list" }));
         let response = client.read_response("children");
@@ -587,7 +611,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
             })
             .cloned()
             .collect();
-        (children.len() == 3).then_some(children)
+        (children.len() == 1).then_some(children)
     });
     let mut child_ids = std::collections::BTreeMap::new();
     let mut child_answers = std::collections::BTreeMap::new();
@@ -607,18 +631,16 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
             text.contains(&format!("{layer} reviewed")).then_some(text)
         });
         assert!(
-            answer.contains(&format!("Review {layer} for {base}..{head}")),
+            answer.contains(&format!("Review {base}..{head}.")),
             "{answer}"
         );
         child_ids.insert(layer.to_string(), child_id.to_string());
         child_answers.insert(layer.to_string(), format!("{layer} reviewed"));
     }
 
-    // The review conversation (ADR 0026): the transcript carries the
-    // dispatch calls and the conductor's synthesis; the layers' full
-    // answers come from the children themselves (observer-side
-    // collection — a mid-turn wait would deadlock the spawn deferral).
-    // The product collector assembles the record from both.
+    // The review conversation: the transcript carries one dispatch call and
+    // the conductor's synthesis; the comprehensive reviewer's reply arrives
+    // through the parent message channel.
     let transcript: Value =
         serde_json::from_str(&messages(&mut client, "harvest", woken_id)).expect("transcript json");
     let harvested = pa_daemon::big_brother::harvest::harvest_review(&transcript, &child_answers)
@@ -626,7 +648,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     assert_eq!(harvested.base, base);
     assert_eq!(harvested.head, head);
     assert_eq!(harvested.conclusion, "all layers reviewed");
-    assert_eq!(harvested.layers.len(), 3);
+    assert_eq!(harvested.layers.len(), 1);
     for layer in &harvested.layers {
         assert_eq!(layer.answer, format!("{} reviewed", layer.layer));
     }
@@ -683,7 +705,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     let records = store.records(&branch).expect("records");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].head, head);
-    assert_eq!(records[0].layers.len(), 3);
+    assert_eq!(records[0].layers.len(), 1);
     assert_eq!(
         records[0].conclusion.as_deref(),
         Some("all layers reviewed")
@@ -692,7 +714,7 @@ fn restarted_observer_wakes_restricted_main_and_dispatches_real_review_children(
     // with child settle notices triggering follow-up turns, so the count
     // is captured here and must not move across the restart below.
     let main_calls_after_review = main_calls.load(Ordering::SeqCst);
-    assert!(main_calls_after_review >= 3);
+    assert!(main_calls_after_review >= 2);
     drop(client);
     drop(restarted);
     std::fs::remove_file(&socket).ok();
@@ -765,7 +787,7 @@ fn the_observer_discovers_ranges_completes_records_and_recovers() {
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let main_calls = Arc::new(AtomicUsize::new(0));
     let url = spawn_review_mock(Arc::clone(&main_calls));
-    let models: Vec<Value> = ["main", "requirements", "project-fit", "implementation"]
+    let models: Vec<Value> = ["main", "comprehensive"]
         .into_iter()
         .map(|id| {
             json!({
@@ -829,7 +851,7 @@ fn the_observer_discovers_ranges_completes_records_and_recovers() {
     let record = &records[0];
     assert_eq!(record.base, base);
     assert_eq!(record.head, head1);
-    assert_eq!(record.layers.len(), 3);
+    assert_eq!(record.layers.len(), 1);
     assert_eq!(record.conclusion.as_deref(), Some("all layers reviewed"));
     for layer in &record.layers {
         assert_eq!(
@@ -872,7 +894,7 @@ fn the_observer_discovers_ranges_completes_records_and_recovers() {
         .find(|record| record.head == head2)
         .expect("the second range's record");
     assert_eq!(second.base, head1, "the second range continues the cursor");
-    assert_eq!(second.layers.len(), 3);
+    assert_eq!(second.layers.len(), 1);
 }
 
 #[test]

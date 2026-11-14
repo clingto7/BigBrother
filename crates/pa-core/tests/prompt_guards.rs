@@ -485,7 +485,7 @@ fn core_layer_documents_the_real_tool_surface() {
     }
 }
 
-// Packaged-set parity (TS packages/coding-agent/skills)
+// Packaged-set parity (TS packages/coding-agent/skills) plus project additions.
 
 /// The packaged skill set at TS tip `f62dae4d0` (`packages/coding-agent/skills/`): 12 skills — the
 /// generic `mcp` doc skill in, the per-service linear/notion pair out (TS removed theirs when the
@@ -505,17 +505,18 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "websearch",
 ];
 
-/// The bundled skills directory matches the TS packaged set name-for-name: the generic `mcp` skill
-/// is present and markdown-only, and the retired per-service pair (linear/notion) is gone.
+/// Big Brother adds its portable review skill to the TS packaged set while preserving the generic
+/// `mcp` skill and omitting the retired per-service pair (linear/notion).
 #[test]
-fn bundled_skills_match_the_ts_packaged_set() {
+fn bundled_skills_match_the_ts_set_and_project_additions() {
     let skills = sorted_bundled_skills();
     let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
     let mut expected = TS_PACKAGED_SKILL_SET.to_vec();
+    expected.push("evidence-based-code-review");
     expected.sort_unstable();
     assert_eq!(
         names, expected,
-        "the packaged skill set must match the TS packaged set"
+        "the packaged skill set must match the TS set plus project additions"
     );
     assert!(
         !names.contains(&"linear") && !names.contains(&"notion"),
