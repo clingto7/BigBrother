@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "fetch-supervision",
+      "head": "2760d76351a508da8c1ea5dbcda53e7e5414fb78",
+      "kind": "large-code-and-policy",
+      "defects": [
+        {
+          "id": "unbounded-git-output-blocks-observation",
+          "severity": "serious",
+          "laterFix": "c575ce3411b6683b53985fae9bec6bcfcefb818f",
+          "evidence": "The later fix bounds Git process output collection and adds hanging-fetch/head-read delivery regressions in crates/pa-daemon/tests/big_brother_delivery_e2e.rs. Adjudicate against the original git.rs and observer.rs at the case head."
+        }
+      ]
+    },
+    {
+      "id": "attempt-supervision",
+      "head": "2448e9ef133d4124a49e551720f15d883387f261",
+      "kind": "large-code-and-policy",
+      "defects": [
+        {
+          "id": "failed-wake-waits-full-budget",
+          "severity": "serious",
+          "laterFix": "63530a965b6416fa6f40f008591559d1be632fc0",
+          "evidence": "The later fix supervises a conductor turn that fails before dispatch. Its refusing-provider regression in crates/pa-daemon/tests/big_brother_attempt_supervision_e2e.rs checks immediate supervision. Confirm presence at this head."
+        }
+      ]
+    },
+    {
+      "id": "settings-preservation",
+      "head": "7b89c111da0f1d9e67849b34f10552bbb4bd1bd1",
+      "kind": "medium-code",
+      "defects": [],
+      "adjudication": "unknown; do not assume clean"
+    },
+    {
+      "id": "git-timeout-repair",
+      "head": "c575ce3411b6683b53985fae9bec6bcfcefb818f",
+      "kind": "medium-code-and-policy",
+      "defects": [],
+      "adjudication": "unknown; do not assume clean"
+    }
+  ]
+}

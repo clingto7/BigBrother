@@ -94,7 +94,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
                 let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
                 let child_dir = this.child_session_dir(&child_id, &identity)?;
-                let cwd = identity.cwd.clone().unwrap_or_else(|| "/".to_string());
+                let cwd = if this
+                    .review_evidence_only
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    this.agent_dir.to_string_lossy().into_owned()
+                } else {
+                    identity.cwd.clone().unwrap_or_else(|| "/".to_string())
+                };
                 let runtime_metadata = json!({
                     "kind": "subagent",
                     "rlmChildId": child_id,

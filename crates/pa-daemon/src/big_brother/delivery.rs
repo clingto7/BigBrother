@@ -12,6 +12,7 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::{json, Value};
 
 use crate::big_brother::git::origin_github_slug;
+use crate::big_brother::profile::ReviewIntensity;
 use crate::big_brother::state::{DeliveryState, RepositoryStateStore, ReviewRecord};
 
 /// The stable Commit Status context (ADR 0012).
@@ -82,30 +83,66 @@ impl DeliveryChannels {
     pub(crate) fn is_empty(&self) -> bool {
         self.bark.is_none() && self.github.is_none()
     }
+
+    /// Monitoring has no Review record, so Commit Status cannot carry its notice.
+    pub(crate) fn supports_monitoring(&self) -> bool {
+        self.bark.is_some()
+    }
 }
 
 /// The advisory Commit Status body (ADR 0012/0029): `success` under the
-/// stable context; the description is the synthesis's first line.
+/// stable context; the description carries assessed scope, evidence,
+/// then the synthesis's first line.
 fn status_payload(record: &ReviewRecord) -> Value {
+    let reference = review_reference(record);
+    let compact_reference = format!(
+        "{}; evidence {}..{}",
+        intensity_name(record.intensity),
+        short_revision(&record.base),
+        short_revision(&record.head)
+    );
+    let reference = if reference.chars().count() + 2 >= STATUS_DESCRIPTION_CAP {
+        compact_reference
+    } else {
+        reference
+    };
     json!({
         "state": "success",
         "context": STATUS_CONTEXT,
-        "description": capped(conclusion_line(record), STATUS_DESCRIPTION_CAP),
+        "description": capped(&format!("{reference}: {}", conclusion_line(record)), STATUS_DESCRIPTION_CAP),
     })
 }
 
-/// The Bark push body: the group's notifications, one synthesis line.
+/// The Bark push body: assessed scope, evidence, and one synthesis line.
 fn bark_payload(repo_name: &str, record: &ReviewRecord) -> Value {
     json!({
         "title": format!("big-brother {repo_name}"),
         "body": format!(
-            "reviewed {}..{}: {}",
+            "reviewed {}..{} ({}): {}",
             short_revision(&record.base),
             short_revision(&record.head),
+            review_reference(record),
             conclusion_line(record)
         ),
         "group": "big-brother",
     })
+}
+
+fn intensity_name(intensity: ReviewIntensity) -> &'static str {
+    match intensity {
+        ReviewIntensity::MonitoringOnly => "monitoringOnly",
+        ReviewIntensity::Requirements => "requirements",
+        ReviewIntensity::RequirementsAndProjectFit => "requirementsAndProjectFit",
+        ReviewIntensity::Full => "full",
+    }
+}
+
+fn review_reference(record: &ReviewRecord) -> String {
+    let intensity = intensity_name(record.intensity);
+    match record.evidence_id.as_deref() {
+        Some(id) => format!("{intensity}; evidence {id}"),
+        None => format!("{intensity}; evidence unavailable"),
+    }
 }
 
 /// Deliver every enabled channel's pending state for one repository's
@@ -150,6 +187,27 @@ pub(crate) async fn deliver_pending(
                 &repo_name,
             )
             .await?;
+        }
+        if let Some(config) = &channels.bark {
+            for notice in &state.branches[branch].monitoring {
+                if !retry_due(Some(&notice.delivery), crate::util::now_ms()) {
+                    continue;
+                }
+                let outcome = send_bark_payload(
+                    &http,
+                    config,
+                    json!({
+                        "title": format!("big-brother {repo_name}"),
+                        "body": notice.message,
+                        "group": "big-brother",
+                    }),
+                )
+                .await;
+                let error = outcome.err().map(|error| error.to_string());
+                let delivery =
+                    DeliveryState::advance(Some(&notice.delivery), crate::util::now_iso(), error);
+                store.update_monitoring_delivery(branch, &notice.head, delivery)?;
+            }
         }
     }
     Ok(())
@@ -268,11 +326,19 @@ async fn send_bark(
     repo_name: &str,
     record: &ReviewRecord,
 ) -> Result<()> {
+    send_bark_payload(http, config, bark_payload(repo_name, record)).await
+}
+
+async fn send_bark_payload(
+    http: &reqwest::Client,
+    config: &BarkConfig,
+    payload: Value,
+) -> Result<()> {
     let url = format!("{}/{}", config.server.trim_end_matches('/'), config.key);
     let response = http
         .post(&url)
         .header("User-Agent", delivery_user_agent())
-        .json(&bark_payload(repo_name, record))
+        .json(&payload)
         .send()
         .await
         .context("POST the bark server")?;
@@ -337,6 +403,8 @@ mod tests {
             branch: "main".to_string(),
             base: BASE.to_string(),
             head: HEAD.to_string(),
+            intensity: crate::big_brother::profile::ReviewIntensity::Full,
+            evidence_id: None,
             attempts: 1,
             completed_at: "2026-10-17T00:00:00.000Z".to_string(),
             layers: Vec::new(),
@@ -399,17 +467,22 @@ mod tests {
 
     #[test]
     fn the_status_body_is_advisory_success_under_the_stable_context() {
-        let body = status_payload(&record());
+        let mut reviewed = record();
+        reviewed.evidence_id = Some(format!("main:{BASE}..{HEAD}"));
+        let body = status_payload(&reviewed);
         assert_eq!(body["state"], json!("success"));
         assert_eq!(body["context"], json!(STATUS_CONTEXT));
-        assert_eq!(body["description"], json!("clean range"));
+        assert_eq!(
+            body["description"],
+            json!(format!("full; evidence main:{BASE}..{HEAD}: clean range"))
+        );
         // No synthesis captured: the neutral fallback, never an empty
         // description.
         let mut bare = record();
         bare.conclusion = None;
         assert_eq!(
             status_payload(&bare)["description"],
-            json!("review completed")
+            json!("full; evidence unavailable: review completed")
         );
         // GitHub's 140-character cap, ellipsized.
         let mut long = record();
@@ -420,16 +493,32 @@ mod tests {
             .to_string();
         assert_eq!(description.chars().count(), STATUS_DESCRIPTION_CAP);
         assert!(description.ends_with('…'));
+        // A long branch name cannot crowd the evidence reference out
+        // of GitHub's fixed description limit.
+        let mut long_id = reviewed;
+        long_id.evidence_id = Some(format!("{}:{BASE}..{HEAD}", "branch".repeat(30)));
+        let description = status_payload(&long_id)["description"]
+            .as_str()
+            .expect("description")
+            .to_string();
+        assert_eq!(
+            description,
+            "full; evidence 01234567..89abcdef: clean range"
+        );
     }
 
     #[test]
     fn the_bark_body_carries_one_synthesis_line() {
-        let body = bark_payload("yadig", &record());
+        let mut reviewed = record();
+        reviewed.evidence_id = Some(format!("main:{BASE}..{HEAD}"));
+        let body = bark_payload("yadig", &reviewed);
         assert_eq!(body["title"], json!("big-brother yadig"));
         assert_eq!(body["group"], json!("big-brother"));
         assert_eq!(
             body["body"],
-            json!("reviewed 01234567..89abcdef: clean range")
+            json!(format!(
+                "reviewed 01234567..89abcdef (full; evidence main:{BASE}..{HEAD}): clean range"
+            ))
         );
     }
 

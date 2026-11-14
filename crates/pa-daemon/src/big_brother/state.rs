@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::profile::repo_dir;
+use super::profile::{repo_dir, ReviewIntensity, ReviewLayer};
 
 /// The only repository-state schema version this build reads.
 pub const STATE_VERSION: u32 = 1;
@@ -60,6 +60,9 @@ pub struct BranchState {
     /// head waits until this range completes; it never preempts.
     #[serde(default)]
     pub in_flight: Option<ReviewRange>,
+    /// Monitoring notifications awaiting or recording delivery.
+    #[serde(default)]
+    pub monitoring: Vec<MonitoringNotification>,
     /// The most recent range that exhausted its attempts (ADR 0028):
     /// `None` until a range fails loudly. The cursor never moved past it,
     /// so a later range re-covers its commits.
@@ -82,6 +85,14 @@ pub struct ReviewRange {
     pub base: String,
     pub head: String,
     #[serde(default)]
+    pub intensity: ReviewIntensity,
+    /// Frozen reviewer configuration for this admitted range.
+    #[serde(default)]
+    pub layers: Vec<ReviewLayer>,
+    /// Identity of the shared evidence asset, once prepared.
+    #[serde(default)]
+    pub evidence_id: Option<String>,
+    #[serde(default)]
     pub admitted_at: String,
     /// The attempts spent so far, the current one included (ADR 0028);
     /// documents from before attempt supervision load as attempt 1.
@@ -91,6 +102,17 @@ pub struct ReviewRange {
     /// documents, where the admission time is the first attempt's start.
     #[serde(default)]
     pub attempt_started_at: String,
+}
+
+/// One observed range's notification, independent of a review record.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitoringNotification {
+    pub base: String,
+    pub head: String,
+    pub message: String,
+    #[serde(default)]
+    pub delivery: DeliveryState,
 }
 
 /// The pre-supervision attempt count: every legacy in-flight range is on
@@ -156,6 +178,10 @@ pub struct ReviewRecord {
     pub branch: String,
     pub base: String,
     pub head: String,
+    #[serde(default)]
+    pub intensity: ReviewIntensity,
+    #[serde(default)]
+    pub evidence_id: Option<String>,
     /// The attempts this review consumed, the completing one included
     /// (ADR 0028); records from before attempt supervision load as 1.
     #[serde(default = "default_attempts")]
@@ -313,6 +339,9 @@ pub enum StateError {
         /// The claimed range head.
         head: String,
     },
+    /// The caller tried to complete a range with different coverage or evidence.
+    #[error("completion for {branch} {head} does not match the admitted intensity or evidence")]
+    ScopeMismatch { branch: String, head: String },
     /// A record file in one branch's records directory claims another
     /// branch: on-disk corruption, never silently skipped.
     #[error(
@@ -383,6 +412,38 @@ impl RepositoryStateStore {
     #[must_use]
     pub fn git_root(&self) -> &Path {
         &self.git_root
+    }
+
+    /// Agent-side location of one immutable evidence asset.
+    #[must_use]
+    pub fn evidence_path(&self, branch: &str, base: &str, head: &str) -> PathBuf {
+        self.repo_dir
+            .join("evidence")
+            .join(sanitize_branch(branch))
+            .join(format!("{base}-{head}.json"))
+    }
+
+    /// Attach an already-written evidence asset to the admitted range.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error when the range is absent or persistence fails.
+    pub fn attach_evidence(&self, branch: &str, head: &str, id: &str) -> Result<(), StateError> {
+        let lock = self.acquire_lock()?;
+        let mut state = self.read_state()?;
+        let range = state
+            .branches
+            .get_mut(branch)
+            .and_then(|branch| branch.in_flight.as_mut())
+            .filter(|range| range.head == head)
+            .ok_or_else(|| StateError::RangeNotInFlight {
+                branch: branch.to_string(),
+                head: head.to_string(),
+            })?;
+        range.evidence_id = Some(id.to_string());
+        self.write_state(&state)?;
+        drop(lock);
+        Ok(())
     }
 
     /// The completed records of one branch, oldest first.
@@ -543,6 +604,21 @@ impl RepositoryStateStore {
     /// Loud on an unseeded branch, an invalid revision, or a state I/O
     /// failure.
     pub fn admit(&self, branch: &str, head: &str) -> Result<Admission, StateError> {
+        self.admit_with_scope(branch, head, ReviewIntensity::Full, &[])
+    }
+
+    /// Admit an immutable range with its selected coverage and reviewer models.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error for an invalid revision, missing baseline, or failed write.
+    pub fn admit_with_scope(
+        &self,
+        branch: &str,
+        head: &str,
+        intensity: ReviewIntensity,
+        layers: &[ReviewLayer],
+    ) -> Result<Admission, StateError> {
         validate_revision(head)?;
         let lock = self.acquire_lock()?;
         let mut state = self.read_state()?;
@@ -574,6 +650,9 @@ impl RepositoryStateStore {
         let range = ReviewRange {
             base,
             head: head.to_string(),
+            intensity,
+            layers: layers.to_vec(),
+            evidence_id: None,
             admitted_at: crate::util::now_iso(),
             attempts: 1,
             attempt_started_at: crate::util::now_iso(),
@@ -583,6 +662,87 @@ impl RepositoryStateStore {
         self.write_state(&state)?;
         drop(lock);
         Ok(Admission::Admitted(range))
+    }
+
+    /// Atomically advance observation progress and queue its notification.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error when the range is absent, has a different intensity, or persistence fails.
+    pub fn complete_monitoring(
+        &self,
+        branch: &str,
+        head: &str,
+        message: String,
+    ) -> Result<(), StateError> {
+        validate_revision(head)?;
+        let lock = self.acquire_lock()?;
+        let mut state = self.read_state()?;
+        let branch_state = state
+            .branches
+            .get_mut(branch)
+            .ok_or_else(|| StateError::NotSeeded {
+                branch: branch.to_string(),
+            })?;
+        let Some(range) = branch_state.in_flight.take() else {
+            if branch_state.cursor.as_deref() == Some(head) {
+                return Ok(());
+            }
+            return Err(StateError::RangeNotInFlight {
+                branch: branch.to_string(),
+                head: head.to_string(),
+            });
+        };
+        if range.head != head || range.intensity != ReviewIntensity::MonitoringOnly {
+            branch_state.in_flight = Some(range);
+            return Err(StateError::RangeNotInFlight {
+                branch: branch.to_string(),
+                head: head.to_string(),
+            });
+        }
+        branch_state.monitoring.push(MonitoringNotification {
+            base: range.base,
+            head: range.head,
+            message,
+            delivery: DeliveryState::default(),
+        });
+        branch_state.cursor = Some(head.to_string());
+        branch_state.updated_at = crate::util::now_iso();
+        self.write_state(&state)?;
+        drop(lock);
+        Ok(())
+    }
+
+    /// Persist a monitoring notification's delivery outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state error when the notification is absent or persistence fails.
+    pub fn update_monitoring_delivery(
+        &self,
+        branch: &str,
+        head: &str,
+        delivery: DeliveryState,
+    ) -> Result<(), StateError> {
+        let lock = self.acquire_lock()?;
+        let mut state = self.read_state()?;
+        let entry = state
+            .branches
+            .get_mut(branch)
+            .and_then(|branch| {
+                branch
+                    .monitoring
+                    .iter_mut()
+                    .find(|entry| entry.head == head)
+            })
+            .ok_or_else(|| StateError::RangeNotInFlight {
+                branch: branch.to_string(),
+                head: head.to_string(),
+            })?;
+        entry.delivery = delivery;
+        self.write_state(&state)?;
+        drop(lock);
+        Ok(())
     }
 
     /// Re-arm the in-flight range after a cancelled attempt (ADR 0028):
@@ -742,6 +902,14 @@ impl RepositoryStateStore {
                 base: record.base,
                 head: record.head,
             });
+        }
+        if let Some(range) = &branch_state.in_flight {
+            if record.intensity != range.intensity || record.evidence_id != range.evidence_id {
+                return Err(StateError::ScopeMismatch {
+                    branch: record.branch,
+                    head: record.head,
+                });
+            }
         }
         // The record lands BEFORE the state advance (ADR 0021): a crash
         // here replays `complete` idempotently through the match above.
@@ -963,6 +1131,8 @@ mod tests {
             branch: branch.to_string(),
             base: base.to_string(),
             head: head.to_string(),
+            intensity: ReviewIntensity::Full,
+            evidence_id: None,
             attempts: 1,
             completed_at: crate::util::now_iso(),
             layers: vec![ReviewRecordLayer {

@@ -17,12 +17,6 @@ use crate::big_brother::git;
 use crate::big_brother::profile::{self, ReviewLayer, ReviewProfile};
 use crate::big_brother::state::RepositoryStateStore;
 
-/// The canonical review layers of the initial review scope (CONTEXT.md
-/// "Review layer"): verifiable requirements, project fit, implementation
-/// quality. A fresh profile starts from these unless the operator assigns
-/// layers explicitly.
-const DEFAULT_LAYERS: [&str; 3] = ["requirements", "project-fit", "implementation"];
-
 /// The enrollment command's runtime options.
 #[derive(Debug, Clone)]
 pub struct InitOptions {
@@ -43,9 +37,6 @@ pub struct InitOptions {
     /// The conductor's creation model. Required when init writes a fresh
     /// profile; a present profile already owns it.
     pub main_model: Option<String>,
-    /// Explicit layer assignments (`name=model`): each replaces the
-    /// same-named default layer or appends a new one.
-    pub layers: Vec<(String, String)>,
     /// One attempt's time budget in seconds (ADR 0028) written into a
     /// fresh profile; a present profile already owns it.
     pub attempt_timeout_seconds: Option<u32>,
@@ -242,7 +233,7 @@ fn ensure_profile(options: &InitOptions, git_root: &Path) -> Result<(ReviewProfi
 }
 
 /// Build a fresh profile from the command's options: the default wake name
-/// and the canonical layers, each model defaulting to the main model.
+/// and one comprehensive reviewer using the main model.
 fn build_profile(options: &InitOptions, git_root: &Path) -> Result<ReviewProfile> {
     let Some(main_model) = options.main_model.as_deref() else {
         bail!(
@@ -258,27 +249,15 @@ fn build_profile(options: &InitOptions, git_root: &Path) -> Result<ReviewProfile
         );
         format!("review-{repository}")
     });
-    let mut layers: Vec<ReviewLayer> = DEFAULT_LAYERS
-        .into_iter()
-        .map(|name| ReviewLayer {
-            name: name.to_string(),
-            model: main_model.to_string(),
-        })
-        .collect();
-    for (name, model) in &options.layers {
-        match layers.iter_mut().find(|layer| &layer.name == name) {
-            Some(layer) => layer.model.clone_from(model),
-            None => layers.push(ReviewLayer {
-                name: name.clone(),
-                model: model.clone(),
-            }),
-        }
-    }
     Ok(ReviewProfile {
+        intensity: profile::ReviewIntensity::Full,
         version: profile::PROFILE_VERSION,
         session_name,
         main_model: Some(main_model.to_string()),
-        layers,
+        layers: vec![ReviewLayer {
+            name: "comprehensive".to_string(),
+            model: main_model.to_string(),
+        }],
         attempt_timeout_seconds: options.attempt_timeout_seconds,
         max_attempts: options.max_attempts,
     })
@@ -333,7 +312,6 @@ mod tests {
             branch: None,
             session_name: None,
             main_model: Some("prime-inference/main".to_string()),
-            layers: Vec::new(),
             attempt_timeout_seconds: None,
             max_attempts: None,
         }
@@ -347,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_profile_uses_the_default_wake_name_and_canonical_layers() {
+    fn a_fresh_profile_uses_one_comprehensive_reviewer() {
         let (_dir, git_root) = watched_repo();
         let options = options(&git_root);
         let profile = build_profile(&options, &git_root).unwrap();
@@ -359,11 +337,7 @@ mod tests {
                 .iter()
                 .map(|layer| (layer.name.as_str(), layer.model.as_str()))
                 .collect::<Vec<_>>(),
-            [
-                ("requirements", "prime-inference/main"),
-                ("project-fit", "prime-inference/main"),
-                ("implementation", "prime-inference/main"),
-            ]
+            [("comprehensive", "prime-inference/main")]
         );
         // The built profile validates and round-trips through its file.
         let path = profile::profile_path(&options.agent_dir, &git_root);
@@ -374,33 +348,6 @@ mod tests {
             .unwrap()
             .expect("loads back");
         assert_eq!(reloaded, profile);
-    }
-
-    #[test]
-    fn explicit_layers_replace_defaults_or_append() {
-        let (_dir, git_root) = watched_repo();
-        let mut options = options(&git_root);
-        options.layers = vec![
-            (
-                "requirements".to_string(),
-                "provider/requirements".to_string(),
-            ),
-            ("security".to_string(), "provider/security".to_string()),
-        ];
-        let profile = build_profile(&options, &git_root).unwrap();
-        assert_eq!(
-            profile
-                .layers
-                .iter()
-                .map(|layer| (layer.name.as_str(), layer.model.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                ("requirements", "provider/requirements"),
-                ("project-fit", "prime-inference/main"),
-                ("implementation", "prime-inference/main"),
-                ("security", "provider/security"),
-            ]
-        );
     }
 
     #[test]
@@ -462,7 +409,7 @@ mod tests {
             &path,
             serde_json::json!({
                 "version": 1, "sessionName": "hand-placed", "mainModel": "p/m",
-                "layers": [{ "name": "solo", "model": "p/solo" }]
+                "layers": [{ "name": "comprehensive", "model": "p/solo" }]
             })
             .to_string(),
         )

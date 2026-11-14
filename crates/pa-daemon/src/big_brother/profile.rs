@@ -25,9 +25,12 @@ pub struct ReviewProfile {
     /// this field matters at creation time (enrollment/init).
     #[serde(default)]
     pub main_model: Option<String>,
-    /// The review layers (ADR 0019): each a distinct child-agent role
-    /// with its own model, dispatched per review range.
+    /// One comprehensive reviewer configuration. Legacy profiles with
+    /// named coverage layers remain readable during migration.
     pub layers: Vec<ReviewLayer>,
+    /// Cumulative coverage selected for newly admitted ranges.
+    #[serde(default)]
+    pub intensity: ReviewIntensity,
     /// One attempt's total time budget in seconds (ADR 0028); `None` is
     /// the default (1800). A stalled conversation is cancelled and
     /// re-attempted when the budget expires — never waited on forever.
@@ -38,6 +41,32 @@ pub struct ReviewProfile {
     /// fails loudly instead of retrying.
     #[serde(default)]
     pub max_attempts: Option<u32>,
+}
+
+/// Cumulative review coverage, independent of the attempt budget.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewIntensity {
+    MonitoringOnly,
+    Requirements,
+    RequirementsAndProjectFit,
+    #[default]
+    Full,
+}
+
+impl ReviewIntensity {
+    /// Whether this intensity includes a named review layer.
+    #[must_use]
+    pub fn includes(self, layer: &str) -> bool {
+        match self {
+            Self::MonitoringOnly => false,
+            Self::Requirements => layer == "requirements" || layer == "comprehensive",
+            Self::RequirementsAndProjectFit => {
+                layer == "requirements" || layer == "project-fit" || layer == "comprehensive"
+            }
+            Self::Full => true,
+        }
+    }
 }
 
 /// The default attempt budget (ADR 0028): 30 minutes.
@@ -97,6 +126,14 @@ impl ReviewProfile {
             .map(|candidate| candidate.model.as_str())
     }
 
+    /// Resolve one reviewer model from a current or legacy profile.
+    #[must_use]
+    pub fn reviewer_model(&self) -> Option<&str> {
+        self.layer_model("comprehensive")
+            .or(self.main_model.as_deref())
+            .or_else(|| self.layers.first().map(|layer| layer.model.as_str()))
+    }
+
     /// One attempt's total time budget (ADR 0028).
     #[must_use]
     pub fn attempt_timeout(&self) -> std::time::Duration {
@@ -133,7 +170,7 @@ impl ReviewProfile {
         if self.session_name.trim().is_empty() {
             return Err(invalid("sessionName must not be empty".to_string()));
         }
-        if self.layers.is_empty() {
+        if self.layers.is_empty() && self.intensity != ReviewIntensity::MonitoringOnly {
             return Err(invalid(
                 "layers must contain at least one review layer".to_string(),
             ));
@@ -162,6 +199,16 @@ impl ReviewProfile {
                     "review layer \"{}\" must name a model",
                     layer.name
                 )));
+            }
+        }
+        if self.intensity != ReviewIntensity::MonitoringOnly
+            && self.layer_model("comprehensive").is_some()
+        {
+            return Ok(());
+        }
+        for required in ["requirements", "project-fit", "implementation"] {
+            if self.intensity.includes(required) && self.layer_model(required).is_none() {
+                return Err(invalid(format!("intensity requires the {required} layer")));
             }
         }
         Ok(())
@@ -216,10 +263,68 @@ pub fn resolve_profile(
     agent_dir: &Path,
     cwd: &Path,
 ) -> Result<Option<ReviewProfile>, ProfileError> {
-    let Some(git_root) = pa_core::packages::find_git_repo_root(cwd) else {
+    let Some(git_root) = find_enrolled_root(agent_dir, cwd).or_else(|| find_git_root(cwd)) else {
         return Ok(None);
     };
-    load_profile_at(&profile_path(agent_dir, &git_root))
+    let mut profile = load_profile_at(&profile_path(agent_dir, &git_root))?;
+    if let Some(profile) = &mut profile {
+        let store = super::state::RepositoryStateStore::open(agent_dir, &git_root);
+        if store.state_path().exists() {
+            let state = store.load().map_err(|error| ProfileError::Invalid {
+                path: store.state_path(),
+                reason: error.to_string(),
+            })?;
+            if let Some(range) = state
+                .branches
+                .values()
+                .find_map(|branch| branch.in_flight.as_ref())
+            {
+                profile.intensity = range.intensity;
+                if !range.layers.is_empty() {
+                    profile.layers.clone_from(&range.layers);
+                }
+            }
+        }
+        profile
+            .layers
+            .retain(|layer| profile.intensity.includes(&layer.name));
+    }
+    Ok(profile)
+}
+
+/// Resolve a watched worktree by its recorded root, even when the
+/// runtime canonicalized a symlinked path such as macOS `/var`.
+pub(crate) fn find_enrolled_root(agent_dir: &Path, cwd: &Path) -> Option<PathBuf> {
+    let canonical_cwd = cwd.canonicalize().ok()?;
+    let entries = std::fs::read_dir(agent_dir.join("big-brother/repos")).ok()?;
+    let mut best: Option<(usize, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let bytes = std::fs::read(entry.path().join("state.json")).ok();
+        let Some(bytes) = bytes else { continue };
+        let Ok(state) = serde_json::from_slice::<super::state::RepositoryState>(&bytes) else {
+            continue;
+        };
+        let Some(root) = state.git_root else { continue };
+        let root = PathBuf::from(root);
+        if let Ok(canonical_root) = root.canonicalize() {
+            if canonical_cwd.starts_with(&canonical_root) {
+                let depth = canonical_root.components().count();
+                if best.as_ref().is_none_or(|(previous, _)| depth > *previous) {
+                    best = Some((depth, root));
+                }
+            }
+        }
+    }
+    best.map(|(_, root)| root)
+}
+
+/// Preserve the operator's lexical repository path: macOS resolves
+/// `/var` to `/private/var`, but the enrollment key uses the former.
+pub(crate) fn find_git_root(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .find(|candidate| candidate.join(".git").exists())
+        .map(Path::to_path_buf)
+        .or_else(|| pa_core::packages::find_git_repo_root(cwd))
 }
 
 /// Read and validate the profile at `path`; `Ok(None)` when absent.
@@ -308,6 +413,7 @@ mod tests {
             profile.layer_model("project-fit"),
             Some("prime-inference/project-fit")
         );
+        assert_eq!(profile.reviewer_model(), Some("prime-inference/main"));
         assert_eq!(profile.layer_model("unknown"), None);
     }
 
@@ -395,6 +501,43 @@ mod tests {
     }
 
     #[test]
+    fn full_intensity_requires_complete_coverage() {
+        let (dir, git_root) = temp_repo();
+        let agent_dir = dir.path().join("agent");
+        for layers in [
+            serde_json::json!([{"name":"requirements","model":"m"}]),
+            serde_json::json!([{"name":"requirements","model":"m"},{"name":"project-fit","model":"m"}]),
+        ] {
+            let body = serde_json::json!({"version":1,"sessionName":"s","intensity":"full","layers":layers});
+            write_profile(&agent_dir, &git_root, &body.to_string());
+            assert!(resolve_profile(&agent_dir, &git_root).is_err());
+        }
+        let body = serde_json::json!({"version":1,"sessionName":"s","intensity":"full","layers":[{"name":"comprehensive","model":"m"}]});
+        write_profile(&agent_dir, &git_root, &body.to_string());
+        assert!(resolve_profile(&agent_dir, &git_root).unwrap().is_some());
+    }
+
+    #[test]
+    fn one_comprehensive_reviewer_is_valid_for_every_review_intensity() {
+        let (dir, git_root) = temp_repo();
+        let agent_dir = dir.path().join("agent");
+        for intensity in ["requirements", "requirementsAndProjectFit", "full"] {
+            let body = serde_json::json!({
+                "version": 1,
+                "sessionName": "s",
+                "intensity": intensity,
+                "layers": [{"name": "comprehensive", "model": "m"}]
+            });
+            write_profile(&agent_dir, &git_root, &body.to_string());
+            let profile = resolve_profile(&agent_dir, &git_root)
+                .unwrap()
+                .expect("single reviewer profile loads");
+            assert_eq!(profile.reviewer_model(), Some("m"));
+            assert!(profile.intensity.includes("comprehensive"));
+        }
+    }
+
+    #[test]
     fn attempt_supervision_defaults_and_overrides() {
         let (dir, git_root) = temp_repo();
         let agent_dir = dir.path().join("agent");
@@ -409,7 +552,7 @@ mod tests {
         assert_eq!(defaults.max_attempts(), 3);
         let body = serde_json::json!({
             "version": 1, "sessionName": "s",
-            "attemptTimeoutSeconds": 5, "maxAttempts": 1,
+            "attemptTimeoutSeconds": 5, "maxAttempts": 1, "intensity": "monitoringOnly",
             "layers": [{ "name": "l", "model": "m" }]
         })
         .to_string();

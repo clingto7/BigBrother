@@ -295,7 +295,9 @@ async fn create_session_with_tool_policy(
         additional_prompt_paths: config.additional_prompt_paths.clone(),
         no_skills: false,
         no_prompt_templates: false,
-        no_context_files: false,
+        // Repository rules are review evidence, never system instructions
+        // for the restricted review conductor.
+        no_context_files: !include_ipython,
         system_prompt: config.custom_system_prompt.clone(),
         append_system_prompt: config.prompt_guidelines.clone(),
         ..Default::default()

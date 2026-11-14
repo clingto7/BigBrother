@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 
 use crate::big_brother::state::{
-    ObservationFailure, RepositoryStateStore, ReviewFailure, ReviewRange, ReviewRecord,
+    MonitoringNotification, ObservationFailure, RepositoryStateStore, ReviewFailure, ReviewRange,
+    ReviewRecord,
 };
 
 /// The query command's runtime options.
@@ -38,6 +39,8 @@ pub struct BranchStatus {
     pub last_observation_failure: Option<ObservationFailure>,
     /// The completed review records, oldest first.
     pub records: Vec<ReviewRecord>,
+    /// Observed ranges sent as notifications without a review.
+    pub monitoring: Vec<MonitoringNotification>,
 }
 
 /// One enrolled repository's status.
@@ -45,6 +48,8 @@ pub struct BranchStatus {
 pub struct RepositoryStatus {
     /// The watched repository's git root.
     pub git_root: PathBuf,
+    /// Agent-side state root, used to locate inspectable evidence.
+    pub agent_dir: PathBuf,
     /// The tracked branches, in the state's (sorted) order.
     pub branches: Vec<BranchStatus>,
 }
@@ -82,9 +87,14 @@ pub fn load_repository_status(options: &QueryOptions) -> Result<RepositoryStatus
             last_failure: branch_state.last_failure,
             last_observation_failure: branch_state.last_observation_failure,
             records,
+            monitoring: branch_state.monitoring,
         });
     }
-    Ok(RepositoryStatus { git_root, branches })
+    Ok(RepositoryStatus {
+        git_root,
+        agent_dir: options.agent_dir.clone(),
+        branches,
+    })
 }
 
 /// Render one repository's status as the operator-facing text.
@@ -94,6 +104,14 @@ pub fn render_status(status: &RepositoryStatus) -> String {
     for branch in &status.branches {
         writeln!(rendered, "branch {}:", branch.name).expect("write to String");
         let cursor = match &branch.cursor {
+            Some(cursor)
+                if branch
+                    .monitoring
+                    .iter()
+                    .any(|notice| notice.head == *cursor) =>
+            {
+                format!("observed through {}", short_revision(cursor))
+            }
             Some(cursor) => format!("reviewed through {}", short_revision(cursor)),
             None => "no review baseline yet".to_string(),
         };
@@ -108,6 +126,20 @@ pub fn render_status(status: &RepositoryStatus) -> String {
             None => "no review in flight".to_string(),
         };
         writeln!(rendered, "  {in_flight}").expect("write to String");
+        for notice in &branch.monitoring {
+            let state = if notice.delivery.delivered() {
+                "delivered"
+            } else {
+                "pending"
+            };
+            writeln!(
+                rendered,
+                "  monitoring notification {}..{}: {state}",
+                short_revision(&notice.base),
+                short_revision(&notice.head)
+            )
+            .expect("write to String");
+        }
         if let Some(failure) = &branch.last_failure {
             writeln!(
                 rendered,
@@ -140,12 +172,27 @@ pub fn render_status(status: &RepositoryStatus) -> String {
                     .map_or("(no synthesis captured)".to_string(), first_line);
                 writeln!(
                     rendered,
-                    "    {}  {}  {}",
+                    "    {}  {}  {:?}  {}",
                     short_revision(&record.head),
                     record.completed_at,
+                    record.intensity,
                     conclusion
                 )
                 .expect("write to String");
+                if record.evidence_id.is_some() {
+                    let store = RepositoryStateStore::open(&status.agent_dir, &status.git_root);
+                    let path = store.evidence_path(&branch.name, &record.base, &record.head);
+                    writeln!(rendered, "      evidence: {}", path.display())
+                        .expect("write to String");
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        if let Ok(asset) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            if let Some(error) = asset["ocr"]["error"].as_str() {
+                                writeln!(rendered, "      OCR hints unavailable: {error}")
+                                    .expect("write to String");
+                            }
+                        }
+                    }
+                }
                 if !record.delivery.is_empty() {
                     writeln!(rendered, "      delivery: {}", render_delivery(record))
                         .expect("write to String");
@@ -230,6 +277,8 @@ mod tests {
             branch: "main".to_string(),
             base: BASE.to_string(),
             head: head.to_string(),
+            intensity: crate::big_brother::profile::ReviewIntensity::Full,
+            evidence_id: None,
             attempts: 1,
             completed_at: "2026-10-14T00:00:00Z".to_string(),
             layers: vec![ReviewRecordLayer {
@@ -287,7 +336,7 @@ mod tests {
 
     #[test]
     fn render_shows_short_revisions_and_first_synthesis_line() {
-        let (_dir, _agent_dir, git_root, store) = enrolled_repo();
+        let (_dir, agent_dir, git_root, store) = enrolled_repo();
         match store.admit("main", HEAD).unwrap() {
             Admission::Admitted(range) => {
                 let mut completed = record(HEAD);
@@ -298,6 +347,7 @@ mod tests {
         }
         let status = RepositoryStatus {
             git_root,
+            agent_dir,
             branches: store
                 .load()
                 .unwrap()
@@ -305,6 +355,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, branch_state)| BranchStatus {
                     records: store.records(&name).unwrap(),
+                    monitoring: branch_state.monitoring,
                     last_failure: Some(ReviewFailure {
                         base: BASE.to_string(),
                         head: "aaaabbbbccccddddaaaabbbbccccddddaaaabbbb".to_string(),

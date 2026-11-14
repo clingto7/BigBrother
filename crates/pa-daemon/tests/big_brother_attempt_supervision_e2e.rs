@@ -32,7 +32,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -78,17 +78,12 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     .to_string()
 }
 
-/// The review provider mock, content-driven (the handoff's discipline: a
-/// mis-keyed discriminator script re-dispatches forever). The conductor
-/// (model `main`) dispatches while the history carries fewer full
-/// dispatch rounds for the CURRENT range than the wake history requires
-/// (one per `REVIEW_RANGE` plus one per `Retry attempt` note); the
-/// `project-fit` either stalls by hanging the connection or emits the
-/// packaged-runtime failure on its first call, then answers on retry;
-/// every other layer model answers once.
+/// Content-driven provider mock. The conductor dispatches one reviewer;
+/// its first attempt can stall or emit a runtime failure, then retry.
 fn serve_review(
     mut stream: TcpStream,
     project_fit_calls: &AtomicUsize,
+    requests: &Mutex<Vec<Value>>,
     behavior: ReviewMockBehavior,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -108,6 +103,10 @@ fn serve_review(
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;
     let request: Value = serde_json::from_slice(&body).map_err(std::io::Error::other)?;
+    requests
+        .lock()
+        .expect("provider requests lock")
+        .push(request.clone());
     let model = request["model"].as_str().unwrap_or_default();
     // Verdicts read the MESSAGES, never the serialized request: a
     // message row repeats its text into preview fields, so counting on
@@ -140,7 +139,33 @@ fn serve_review(
         }
         Some((base.to_string(), head.to_string()))
     }();
-    let data = if model == "main" {
+    let is_reviewer = request_text.contains("Conductor-prepared review brief");
+    let data = if model == "main" && is_reviewer {
+        let calls = project_fit_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if calls >= 2 {
+            vec![
+                chunk(
+                    &json!({"role": "assistant", "content": "comprehensive reviewed"}),
+                    None,
+                ),
+                chunk(&json!({}), Some("stop")),
+            ]
+        } else if matches!(behavior, ReviewMockBehavior::RuntimeMissingThenReply) {
+            vec![
+                chunk(
+                    &json!({
+                        "role": "assistant",
+                        "content": "I cannot start work: kernel startup failed after 11ms: uv is required to set up the Python kernel"
+                    }),
+                    None,
+                ),
+                chunk(&json!({}), Some("stop")),
+            ]
+        } else {
+            std::thread::sleep(Duration::from_secs(600));
+            return Ok(());
+        }
+    } else if model == "main" {
         // Dispatch rounds counted off the assistant history's tool_calls
         // blocks — the one place the wire never duplicates (custom rows
         // repeat their text into preview fields, and how often depends on
@@ -169,31 +194,25 @@ fn serve_review(
                     })
                 })
                 .count();
-            let required_calls = 3 * (1 + retry_notes.min(1));
+            let required_calls = 1 + retry_notes.min(1);
             dispatch_calls_seen < required_calls
         });
         match dispatch_target {
             Some((base, head)) => {
-                let layers = ["requirements", "project-fit", "implementation"];
-                let calls: Vec<Value> = layers
-                    .iter()
-                    .enumerate()
-                    .map(|(index, layer)| {
-                        json!({
-                            "index": index,
-                            "id": format!("call-review-{index}-{head}"),
-                            "type": "function",
-                            "function": {
-                                "name": "dispatch_review",
-                                "arguments": json!({
-                                    "layer": layer,
-                                    "baseSha": base,
-                                    "headSha": head
-                                }).to_string()
-                            }
-                        })
-                    })
-                    .collect();
+                let calls = vec![json!({
+                    "index": 0,
+                    "id": format!("call-review-{head}"),
+                    "type": "function",
+                    "function": {
+                        "name": "dispatch_review",
+                        "arguments": json!({
+                            "layer": "comprehensive",
+                            "baseSha": base,
+                            "headSha": head,
+                            "reviewBrief": "Check changed areas against project rules and requirements."
+                        }).to_string()
+                    }
+                })];
                 vec![
                     chunk(&json!({"role": "assistant", "tool_calls": calls}), None),
                     chunk(&json!({}), Some("tool_calls")),
@@ -206,35 +225,6 @@ fn serve_review(
                 ),
                 chunk(&json!({}), Some("stop")),
             ],
-        }
-    } else if model == "project-fit" {
-        // The stall (ADR 0028's reason to exist) accepts the first
-        // request and never answers. The runtime-failure script emits its
-        // error text once to verify it cannot be recorded as a successful
-        // review and is retried.
-        let calls = project_fit_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if calls >= 2 {
-            vec![
-                chunk(
-                    &json!({"role": "assistant", "content": "project-fit reviewed"}),
-                    None,
-                ),
-                chunk(&json!({}), Some("stop")),
-            ]
-        } else if matches!(behavior, ReviewMockBehavior::RuntimeMissingThenReply) {
-            vec![
-                chunk(
-                    &json!({
-                        "role": "assistant",
-                        "content": "I cannot start work: kernel startup failed after 11ms: uv is required to set up the Python kernel"
-                    }),
-                    None,
-                ),
-                chunk(&json!({}), Some("stop")),
-            ]
-        } else {
-            std::thread::sleep(Duration::from_secs(600));
-            return Ok(());
         }
     } else {
         vec![
@@ -258,7 +248,7 @@ fn serve_review(
     )
 }
 
-fn spawn_review_mock(behavior: ReviewMockBehavior) -> (PathBuf, Arc<AtomicUsize>) {
+fn spawn_review_mock(behavior: ReviewMockBehavior) -> (PathBuf, Arc<Mutex<Vec<Value>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
     let url = format!(
         "http://127.0.0.1:{}/v1",
@@ -266,16 +256,19 @@ fn spawn_review_mock(behavior: ReviewMockBehavior) -> (PathBuf, Arc<AtomicUsize>
     );
     let calls = Arc::new(AtomicUsize::new(0));
     let project_fit_calls = Arc::clone(&calls);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded_requests = Arc::clone(&requests);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let calls = Arc::clone(&project_fit_calls);
+            let requests = Arc::clone(&recorded_requests);
             std::thread::spawn(move || {
-                let _ = serve_review(stream, &calls, behavior);
+                let _ = serve_review(stream, &calls, &requests, behavior);
             });
         }
     });
-    (PathBuf::from(url), calls)
+    (PathBuf::from(url), requests)
 }
 
 /// A provider that refuses every request with a 500: the conductor's
@@ -414,16 +407,29 @@ struct Fixture {
     agent_dir: PathBuf,
     socket: PathBuf,
     store: RepositoryStateStore,
+    provider_requests: Arc<Mutex<Vec<Value>>>,
 }
 
 fn fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
-    let url = spawn_review_mock(ReviewMockBehavior::StallThenReply).0;
-    fixture_with(repo_dir_name, max_attempts, &url, ATTEMPT_TIMEOUT_SECONDS)
+    let (url, requests) = spawn_review_mock(ReviewMockBehavior::StallThenReply);
+    fixture_with(
+        repo_dir_name,
+        max_attempts,
+        &url,
+        ATTEMPT_TIMEOUT_SECONDS,
+        requests,
+    )
 }
 
 fn runtime_failure_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
-    let url = spawn_review_mock(ReviewMockBehavior::RuntimeMissingThenReply).0;
-    fixture_with(repo_dir_name, max_attempts, &url, ATTEMPT_TIMEOUT_SECONDS)
+    let (url, requests) = spawn_review_mock(ReviewMockBehavior::RuntimeMissingThenReply);
+    fixture_with(
+        repo_dir_name,
+        max_attempts,
+        &url,
+        ATTEMPT_TIMEOUT_SECONDS,
+        requests,
+    )
 }
 
 /// A dead-provider fixture whose attempt budget is unreachable inside any
@@ -431,7 +437,13 @@ fn runtime_failure_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
 /// through the dead-turn fast lane, never the timeout.
 fn dead_fixture(repo_dir_name: &str, max_attempts: u32) -> Fixture {
     let url = spawn_dead_review_mock();
-    fixture_with(repo_dir_name, max_attempts, &url, 1800)
+    fixture_with(
+        repo_dir_name,
+        max_attempts,
+        &url,
+        1800,
+        Arc::new(Mutex::new(Vec::new())),
+    )
 }
 
 fn fixture_with(
@@ -439,6 +451,7 @@ fn fixture_with(
     max_attempts: u32,
     url: &Path,
     attempt_timeout_seconds: u32,
+    provider_requests: Arc<Mutex<Vec<Value>>>,
 ) -> Fixture {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let repo = dir.path().join(repo_dir_name);
@@ -484,23 +497,6 @@ fn fixture_with(
             branch: None,
             session_name: None,
             main_model: Some("prime-inference/main".to_string()),
-            // Distinct layer models: the mock scripts the layers BY MODEL
-            // ID, and init's default would run every layer on the main
-            // model.
-            layers: vec![
-                (
-                    "requirements".to_string(),
-                    "prime-inference/requirements".to_string(),
-                ),
-                (
-                    "project-fit".to_string(),
-                    "prime-inference/project-fit".to_string(),
-                ),
-                (
-                    "implementation".to_string(),
-                    "prime-inference/implementation".to_string(),
-                ),
-            ],
             attempt_timeout_seconds: Some(attempt_timeout_seconds),
             max_attempts: Some(max_attempts),
         }))
@@ -514,6 +510,7 @@ fn fixture_with(
         agent_dir,
         socket,
         store,
+        provider_requests,
     }
 }
 
@@ -595,6 +592,13 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
     // the next scan cancel the attempt and re-arm the range as attempt 2,
     // whose fresh dispatch completes.
     observe_until_admitted(&fixture);
+    let evidence_id = fixture.store.load().unwrap().branches[&branch]
+        .in_flight
+        .as_ref()
+        .unwrap()
+        .evidence_id
+        .clone()
+        .expect("evidence identity");
     std::thread::sleep(Duration::from_secs(5));
     age_out_attempt(&fixture);
     // The retry's cold-wake chain (worker spawn, dispatch turn, child
@@ -609,10 +613,31 @@ fn a_stalled_attempt_is_cancelled_and_the_retry_completes() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].base, base);
     assert_eq!(records[0].head, head);
+    assert_eq!(
+        records[0].evidence_id.as_deref(),
+        Some(evidence_id.as_str())
+    );
+    assert!(fixture.store.evidence_path(&branch, &base, &head).exists());
     // The record carries the attempt count the review consumed, and the
     // synthesis unwrapped after the marker line (ADR 0030).
     assert_eq!(records[0].attempts, 2);
-    assert_eq!(records[0].layers.len(), 3);
+    assert_eq!(records[0].layers.len(), 1);
+    let requests = fixture.provider_requests.lock().expect("provider requests");
+    let reviewer_requests: Vec<_> = requests
+        .iter()
+        .filter(|request| {
+            request["messages"]
+                .to_string()
+                .contains("Conductor-prepared review brief")
+        })
+        .collect();
+    assert!(
+        reviewer_requests.len() >= 2,
+        "reviewer did not receive both attempts"
+    );
+    assert!(reviewer_requests
+        .iter()
+        .all(|request| request["messages"].to_string().contains(&evidence_id)));
     assert_eq!(
         records[0].conclusion.as_deref(),
         Some("all layers reviewed")
@@ -645,7 +670,7 @@ fn a_failed_kernel_boot_fails_the_attempt_and_the_retry_completes() {
     let records = fixture.store.records(&branch).expect("records");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].attempts, 2);
-    assert_eq!(records[0].layers.len(), 3);
+    assert_eq!(records[0].layers.len(), 1);
     assert!(branch_state.last_failure.is_none());
 }
 
